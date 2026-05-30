@@ -1,0 +1,308 @@
+# Phase 5.1 — Exotel Outbound Calling
+
+## Phase Gate Confirmation
+
+Phase 4 (`PHASE_4_INTEGRATION.md`) is marked **DONE** in `PHASE_PROGRESS.md`. Phase 5.1 is eligible to start.
+
+## Objective
+
+Build the Exotel outbound calling client and webhook endpoint so the server can trigger outgoing telephone calls and correctly handle the applet callback that routes call audio into our WebSocket transport.
+
+---
+
+## User Review Required
+
+> [!WARNING]
+> **Webhook response format discrepancy.** The `PHASE_5_1_OUTBOUND.md` spec says the webhook should return **ExoML XML** (`<Response><Connect><Stream url="wss://..."/></Connect></Response>`). However, research confirms that Exotel's **Voicebot Applet** (the bidirectional streaming applet used with Pipecat) uses a **different pattern**: Exotel sends a `GET` request to your webhook URL, and your server must return a **JSON response** with `{"url": "wss://..."}`.
+>
+> The ExoML `<Connect><Stream>` pattern is for the **Stream Applet** (unidirectional). Since our architecture uses **bidirectional audio** (Voicebot Applet), we should use the JSON response format instead.
+>
+> **Proposed correction:** The webhook at `GET /telephony/webhook` will return `JSONResponse({"url": "wss://{PUBLIC_NGROK_URL}/telephony/exotel"})` instead of XML.
+
+> [!IMPORTANT]
+> **Exotel cluster subdomain.** Exotel has two API clusters:
+> - **Mumbai Cluster:** `api.in.exotel.com` (dashboard: `my.in.exotel.com`)
+> - **Singapore Cluster:** `api.exotel.com` (dashboard: `my.exotel.com`)
+>
+> The PHASE_5_1 spec lists 6 env vars but does not include `EXOTEL_SUBDOMAIN`. I propose adding it as a 7th config field with a default of `api.exotel.com`, since the correct cluster depends on which Exotel dashboard the user's account is registered on.
+
+---
+
+## Exotel API Research Findings
+
+### Outbound Connect API (v1)
+
+| Detail | Value |
+|:---|:---|
+| **Endpoint** | `POST https://{subdomain}/v1/Accounts/{account_sid}/Calls/connect` |
+| **Authentication** | HTTP Basic Auth (`api_key` as username, `api_token` as password) |
+| **Content-Type** | `application/x-www-form-urlencoded` (form data, NOT JSON) |
+| **Response** | XML containing `<Sid>` of the initiated call |
+
+**Required form-data parameters:**
+
+| Parameter | Description |
+|:---|:---|
+| `From` | The customer's phone number (called first) |
+| `CallerId` | Your Exotel virtual number (ExoPhone) |
+| `Url` | The flow/applet URL: `http://my.exotel.com/{ACCOUNT_SID}/exoml/start_voice/{FLOW_ID}` |
+| `CallType` | `"trans"` (transactional call) |
+
+**Number formatting (v1 API):**
+- Indian mobile: 10-digit with `0` prefix (e.g., `09876543210`)
+- **Not** E.164 format — the v1 API rejects `+91` prefixed numbers
+
+### Voicebot Applet Webhook (Dynamic URL)
+
+When a call is answered and reaches the Voicebot Applet in the Exotel flow:
+
+1. Exotel sends a **GET request** to the configured webhook URL
+2. The server must respond with `Content-Type: application/json`
+3. Response body: `{"url": "wss://{PUBLIC_NGROK_URL}/telephony/exotel"}`
+4. Exotel then opens a WebSocket connection to that URL
+
+**Query params sent by Exotel on the GET:** `CallSid`, `CallFrom`, `CallTo`, `Direction`, etc.
+
+### Reference: Pipecat Official Example
+
+The [pipecat-examples/exotel-chatbot/outbound/server.py](https://github.com/pipecat-ai/pipecat-examples/tree/main/exotel-chatbot/outbound) uses:
+- `aiohttp.BasicAuth(api_key, api_token)` for auth
+- `session.post(url, data=data, auth=auth)` with **form data** (not JSON)
+- `CallerId` set to the Exotel virtual number
+- Subdomain: `api.exotel.com`
+
+---
+
+## Proposed Changes
+
+### Component 1: Configuration — New Exotel Fields
+
+#### [MODIFY] [config.py](file:///c:/NovaAutomata_Internship/VoiceAgent_Pipecat/app/config.py)
+
+Add 7 new optional Pydantic fields for outbound Exotel credentials. These are **optional with defaults of `""`** so that the existing inbound-only flow doesn't break if users don't set them. The `ExotelOutboundClient` will validate that they're non-empty at call time.
+
+```python
+# --- Exotel Outbound Configuration ---
+exotel_account_sid: str = Field(default="", alias="EXOTEL_ACCOUNT_SID")
+exotel_api_key: str = Field(default="", alias="EXOTEL_API_KEY")
+exotel_api_token: str = Field(default="", alias="EXOTEL_API_TOKEN")
+exotel_virtual_number: str = Field(default="", alias="EXOTEL_VIRTUAL_NUMBER")
+exotel_flow_id: str = Field(default="", alias="EXOTEL_FLOW_ID")
+exotel_subdomain: str = Field(default="api.exotel.com", alias="EXOTEL_SUBDOMAIN")
+public_ngrok_url: str = Field(default="", alias="PUBLIC_NGROK_URL")
+```
+
+**Rationale for optional defaults:**
+- The existing inbound WebSocket flow does not need these credentials.
+- The `ExotelOutboundClient` will raise a clear `ValueError` if required fields are missing when an outbound call is actually attempted.
+- `exotel_subdomain` defaults to `api.exotel.com` (Singapore). Users on the Mumbai cluster set `EXOTEL_SUBDOMAIN=api.in.exotel.com`.
+
+---
+
+### Component 2: Exotel Outbound Client
+
+#### [NEW] [exotel_client.py](file:///c:/NovaAutomata_Internship/VoiceAgent_Pipecat/app/services/exotel_client.py)
+
+A focused, typed Exotel REST API client for triggering outbound calls.
+
+**Class: `ExotelOutboundClient`**
+
+```python
+class ExotelOutboundClient:
+    """Async Exotel outbound calling client using httpx."""
+
+    def __init__(self, settings: Settings) -> None:
+        # Validate required fields are non-empty
+        # Store credentials
+        # Build base URL: https://{subdomain}/v1/Accounts/{account_sid}/Calls/connect
+        # Create httpx.AsyncClient with BasicAuth(api_key, api_token)
+
+    async def make_call(self, to_number: str) -> ExotelCallResult:
+        """Trigger an outbound call to the given phone number."""
+        # Format number (ensure 0-prefix for v1 API)
+        # Build form data: From=to_number, CallerId=virtual_number, Url=flow_url, CallType=trans
+        # POST to connect endpoint
+        # Parse XML response for CallSid
+        # Return typed result
+
+    async def close(self) -> None:
+        """Close the underlying httpx client."""
+```
+
+**Key design decisions:**
+
+1. **httpx.AsyncClient lifecycle:** Create the client in `__init__` and close it via `close()`. The client is attached to the FastAPI lifespan (created at startup, closed at shutdown). This follows httpx best practice of reusing connection pools.
+
+2. **Number formatting helper:**
+   ```python
+   def _format_number_for_v1(self, number: str) -> str:
+       """Ensure phone number has 0-prefix for Exotel v1 API.
+       
+       Strips any +91 prefix and adds leading 0 if not present.
+       Example: "+919876543210" → "09876543210"
+       Example: "9876543210" → "09876543210"
+       Example: "09876543210" → "09876543210"
+       """
+   ```
+
+3. **Flow URL construction:**
+   ```python
+   flow_url = f"http://my.exotel.com/{self._account_sid}/exoml/start_voice/{self._flow_id}"
+   ```
+
+4. **Typed result:**
+   ```python
+   @dataclass
+   class ExotelCallResult:
+       success: bool
+       call_sid: str | None = None
+       error: str | None = None
+   ```
+
+5. **Error handling:** Catch `httpx.HTTPStatusError` and `httpx.RequestError`, log with `loguru`, and return a typed error result instead of raising.
+
+6. **XML response parsing:** Exotel v1 returns XML. Use `xml.etree.ElementTree` (stdlib) to extract `<Call><Sid>` — no new dependency needed.
+
+---
+
+### Component 3: Webhook Route
+
+#### [MODIFY] [telephony.py](file:///c:/NovaAutomata_Internship/VoiceAgent_Pipecat/app/routers/telephony.py)
+
+Add a `GET /telephony/webhook` route that Exotel's Voicebot Applet calls when the outbound call is answered.
+
+```python
+@router.get("/webhook")
+async def exotel_webhook(request: Request) -> JSONResponse:
+    """Handle Exotel Voicebot Applet callback.
+
+    When an outbound call is answered, Exotel's Voicebot Applet sends
+    a GET request to this endpoint. We return a JSON response containing
+    the WebSocket URL that Exotel should connect to for bidirectional
+    audio streaming.
+
+    Query params from Exotel: CallSid, CallFrom, CallTo, Direction, etc.
+    """
+    settings = get_settings()
+    call_sid = request.query_params.get("CallSid", "unknown")
+
+    log = logger.bind(call_sid=call_sid)
+    log.info(
+        "Exotel webhook received",
+        call_from=request.query_params.get("CallFrom"),
+        direction=request.query_params.get("Direction"),
+    )
+
+    wss_url = f"wss://{settings.public_ngrok_url}/telephony/exotel"
+
+    log.info("Returning WebSocket URL to Exotel", wss_url=wss_url)
+    return JSONResponse(content={"url": wss_url})
+```
+
+**New imports needed:** `from fastapi import Request` and `from fastapi.responses import JSONResponse`.
+
+> [!NOTE]
+> The route is `GET` (not `POST`) because Exotel's Voicebot Applet dynamic URL feature sends GET requests. The existing `WS /telephony/exotel` route is unchanged — it will handle the WebSocket connection that Exotel opens after receiving our JSON response.
+
+---
+
+### Component 4: Environment Placeholders
+
+#### [MODIFY] [.env.example](file:///c:/NovaAutomata_Internship/VoiceAgent_Pipecat/.env.example)
+
+Append the new Exotel outbound configuration keys:
+
+```env
+# --- Exotel Outbound Configuration ---
+EXOTEL_ACCOUNT_SID=your_exotel_account_sid
+EXOTEL_API_KEY=your_exotel_api_key
+EXOTEL_API_TOKEN=your_exotel_api_token
+EXOTEL_VIRTUAL_NUMBER=your_exophone_number
+EXOTEL_FLOW_ID=your_app_bazaar_flow_id
+EXOTEL_SUBDOMAIN=api.exotel.com
+PUBLIC_NGROK_URL=your-ngrok-subdomain.ngrok-free.app
+```
+
+---
+
+### Component 5: App Lifespan — Client Lifecycle
+
+#### [MODIFY] [main.py](file:///c:/NovaAutomata_Internship/VoiceAgent_Pipecat/main.py)
+
+> [!IMPORTANT]
+> `main.py` is **not** in the Phase 5.1 allowed files list. However, the `ExotelOutboundClient` needs lifecycle management (create at startup, close at shutdown) and `main.py` owns the FastAPI lifespan. **Two options:**
+>
+> **Option A (Recommended):** Lazy-initialize the client in `exotel_client.py` itself — create it on first use, store as module-level singleton. No `main.py` changes needed. The downside is no explicit `close()` on shutdown.
+>
+> **Option B:** Store the client on `app.state` in the lifespan. Requires modifying `main.py` (not in allowed files — needs your approval).
+>
+> I recommend **Option A** for Phase 5.1, with `main.py` integration deferred to Phase 5.2 or Phase 6 when the allowed file list is broader.
+
+**Option A implementation in `exotel_client.py`:**
+
+```python
+# Module-level singleton
+_client: ExotelOutboundClient | None = None
+
+def get_outbound_client(settings: Settings) -> ExotelOutboundClient:
+    """Return a singleton ExotelOutboundClient, creating it on first use."""
+    global _client
+    if _client is None:
+        _client = ExotelOutboundClient(settings)
+    return _client
+```
+
+---
+
+## Files Changed Summary
+
+| File | Action | What |
+|:---|:---|:---|
+| [config.py](file:///c:/NovaAutomata_Internship/VoiceAgent_Pipecat/app/config.py) | MODIFY | Add 7 Exotel outbound fields (optional with defaults) |
+| [exotel_client.py](file:///c:/NovaAutomata_Internship/VoiceAgent_Pipecat/app/services/exotel_client.py) | NEW | `ExotelOutboundClient` with httpx, `ExotelCallResult`, number formatting, singleton accessor |
+| [telephony.py](file:///c:/NovaAutomata_Internship/VoiceAgent_Pipecat/app/routers/telephony.py) | MODIFY | Add `GET /telephony/webhook` returning JSON `{"url": "wss://..."}` |
+| [.env.example](file:///c:/NovaAutomata_Internship/VoiceAgent_Pipecat/.env.example) | MODIFY | Append 7 Exotel outbound placeholder keys |
+
+---
+
+## What Does NOT Change
+
+| File | Reason |
+|:---|:---|
+| `pipecat_pipeline.py` | No pipeline changes needed for outbound — same audio flow |
+| `runtime.py` | Session management is the same for inbound and outbound calls |
+| `database.py` | Persistence is unchanged |
+| `metrics_logger.py` | Metrics capture is unchanged |
+| `schemas.py` | No new persistence shapes needed |
+| `transport_factory.py` | Transport construction is the same |
+
+---
+
+## Verification Plan
+
+### Automated Checks
+1. **Config parsing:** Verify all 7 new fields parse from `.env` without errors
+2. **Import sanity:** `from app.services.exotel_client import ExotelOutboundClient, get_outbound_client`
+3. **App startup:** `from main import app` — verify new route `/telephony/webhook` is registered
+4. **Number formatting:** Test `_format_number_for_v1()` with various input formats
+5. **Webhook curl test:** `curl http://127.0.0.1:8000/telephony/webhook?CallSid=test123` — expect JSON `{"url": "wss://..."}`
+6. **Client construction:** Verify `ExotelOutboundClient` initializes with correct base URL and auth
+
+### Manual Verification (Human-Owned)
+- Actual outbound call via Exotel
+- Real Voicebot Applet webhook flow
+- ngrok tunnel and WebSocket connectivity
+- Audio quality on outbound calls
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> **Q1: Webhook response format.** Do you approve the correction from ExoML XML to JSON `{"url": "wss://..."}` for the Voicebot Applet? This matches the actual Exotel documentation and the official Pipecat example. The ExoML XML pattern is for the Stream Applet (unidirectional only).
+
+> [!NOTE]
+> **Q2: `EXOTEL_SUBDOMAIN` addition.** Do you approve adding `EXOTEL_SUBDOMAIN` as a 7th config field (not in the original 6 listed in `PHASE_5_1_OUTBOUND.md`)? It defaults to `api.exotel.com` but users on the Mumbai cluster need `api.in.exotel.com`. Without this, the subdomain would be hardcoded.
+
+> [!NOTE]
+> **Q3: Client lifecycle (Option A vs B).** Do you want the lazy-singleton pattern (Option A, stays within allowed files) or the lifespan-managed pattern (Option B, requires modifying `main.py` which is not in Phase 5.1's allowed files)?

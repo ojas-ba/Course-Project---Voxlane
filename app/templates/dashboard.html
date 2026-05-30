@@ -1,0 +1,1516 @@
+{% if part == 'full' %}
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Agent Telemetry Dashboard</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap"
+        rel="stylesheet">
+
+    <!-- HTMX CDN -->
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+
+    <!-- Premium Vanilla CSS Dark Theme -->
+    <style>
+        :root {
+            --bg-base: #09090b;
+            --bg-card: rgba(24, 24, 27, 0.6);
+            --bg-card-hover: rgba(39, 39, 42, 0.7);
+            --border-muted: rgba(255, 255, 255, 0.08);
+            --border-hover: rgba(255, 255, 255, 0.15);
+            --text-primary: #f4f4f5;
+            --text-secondary: #a1a1aa;
+            --text-muted: #71717a;
+
+            --accent-primary: #8b5cf6;
+            --accent-primary-gradient: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            --accent-green: #10b981;
+            --accent-green-glow: rgba(16, 185, 129, 0.15);
+            --accent-red: #ef4444;
+            --accent-blue: #3b82f6;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-base);
+            color: var(--text-primary);
+            min-height: 100vh;
+            line-height: 1.5;
+            padding: 2rem;
+        }
+
+        h1,
+        h2,
+        h3,
+        h4,
+        .brand-title {
+            font-family: 'Outfit', sans-serif;
+            font-weight: 600;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-muted);
+            padding-bottom: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .brand-logo {
+            width: 32px;
+            height: 32px;
+            background: var(--accent-primary-gradient);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-family: 'Outfit', sans-serif;
+            color: white;
+            font-size: 1.2rem;
+        }
+
+        .brand-title {
+            font-size: 1.5rem;
+            letter-spacing: -0.5px;
+        }
+
+        .brand-subtitle {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-top: 2px;
+        }
+
+        .grid-layout {
+            display: grid;
+            grid-template-columns: 400px 1fr;
+            gap: 2rem;
+        }
+
+        @media (max-width: 1024px) {
+            .grid-layout {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background-color: var(--bg-card);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border-muted);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .card:hover {
+            border-color: var(--border-hover);
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+        }
+
+        .card-title {
+            font-size: 1.15rem;
+            margin-bottom: 1.25rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            color: var(--text-primary);
+            border-bottom: 1px solid var(--border-muted);
+            padding-bottom: 0.75rem;
+        }
+
+        .card-header-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .form-group {
+            margin-bottom: 1rem;
+        }
+
+        .form-label {
+            display: block;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+
+        .form-control {
+            width: 100%;
+            background-color: rgba(9, 9, 11, 0.8);
+            border: 1px solid var(--border-muted);
+            border-radius: 8px;
+            color: var(--text-primary);
+            padding: 0.75rem 1rem;
+            font-size: 0.95rem;
+            font-family: inherit;
+            transition: all 0.2s;
+        }
+
+        .form-control:focus {
+            outline: none;
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.25);
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            padding: 0.75rem 1.25rem;
+            border-radius: 8px;
+            font-weight: 500;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: none;
+            font-family: inherit;
+        }
+
+        .btn-primary {
+            background: var(--accent-primary-gradient);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            opacity: 0.9;
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            background-color: rgba(255, 255, 255, 0.05);
+            color: var(--text-primary);
+            border: 1px solid var(--border-muted);
+        }
+
+        .btn-secondary:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+            border-color: var(--text-secondary);
+        }
+
+        .btn-sm {
+            width: auto;
+            padding: 4px 12px;
+            font-size: 0.8rem;
+        }
+
+        .status-badge {
+            font-size: 0.75rem;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-weight: 600;
+        }
+
+        .status-badge.connected {
+            background-color: var(--accent-green-glow);
+            color: var(--accent-green);
+        }
+
+        .status-badge.disconnected {
+            background-color: rgba(239, 68, 68, 0.15);
+            color: var(--accent-red);
+        }
+
+        .dialer-status {
+            padding: 1rem;
+            border-radius: 8px;
+            background-color: rgba(139, 92, 246, 0.1);
+            border: 1px solid rgba(139, 92, 246, 0.2);
+            text-align: center;
+        }
+
+        .dialer-status.error {
+            background-color: rgba(239, 68, 68, 0.1);
+            border-color: rgba(239, 68, 68, 0.2);
+        }
+
+        .dialer-status-title {
+            font-size: 0.95rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .dialer-status-desc {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 1rem;
+            word-break: break-all;
+        }
+
+        .dialer-status-desc-error {
+            color: var(--accent-red);
+            opacity: 0.9;
+        }
+
+        .pulse-indicator {
+            width: 10px;
+            height: 10px;
+            background-color: var(--accent-green);
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+            animation: pulse 1.6s infinite;
+        }
+
+        .pulse-indicator.ringing {
+            background-color: var(--accent-primary);
+            box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.7);
+            animation: pulse-ring 1.6s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                transform: scale(0.95);
+                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+            }
+
+            70% {
+                transform: scale(1);
+                box-shadow: 0 0 0 6px rgba(16, 185, 129, 0);
+            }
+
+            100% {
+                transform: scale(0.95);
+                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+            }
+        }
+
+        @keyframes pulse-ring {
+            0% {
+                transform: scale(0.95);
+                box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.7);
+            }
+
+            70% {
+                transform: scale(1);
+                box-shadow: 0 0 0 6px rgba(139, 92, 246, 0);
+            }
+
+            100% {
+                transform: scale(0.95);
+                box-shadow: 0 0 0 0 rgba(139, 92, 246, 0);
+            }
+        }
+
+        .session-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .session-item {
+            background-color: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-muted);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .session-meta {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .session-id {
+            font-family: monospace;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+
+        .session-info {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        .session-badge {
+            background-color: var(--accent-green-glow);
+            color: var(--accent-green);
+            font-size: 0.75rem;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .logs-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-height: calc(100vh - 350px);
+            min-height: 300px;
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+
+        .logs-list::-webkit-scrollbar,
+        .timeline-wrapper::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .logs-list::-webkit-scrollbar-thumb,
+        .timeline-wrapper::-webkit-scrollbar-thumb {
+            background-color: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+        }
+
+        .log-item {
+            background-color: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-muted);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .log-item:hover {
+            background-color: rgba(255, 255, 255, 0.05);
+            border-color: rgba(255, 255, 255, 0.2);
+            transform: translateY(-1px);
+        }
+
+        .log-item.active-detail {
+            border-color: var(--accent-primary);
+            background-color: rgba(139, 92, 246, 0.05);
+        }
+
+        .log-meta {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .log-sid {
+            font-family: monospace;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .log-date {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .log-stats {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .log-badge-success {
+            color: var(--accent-green);
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+
+        .log-badge-failed {
+            color: var(--accent-red);
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+
+        .log-turns {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .metric-card {
+            background-color: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-muted);
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: center;
+        }
+
+        .metric-val {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            font-family: 'Outfit', sans-serif;
+            margin-top: 4px;
+        }
+
+        .metric-lbl {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .config-snapshot-panel {
+            background-color: rgba(255, 255, 255, 0.01);
+            border: 1px solid var(--border-muted);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 12px;
+        }
+
+        .config-item {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .config-lbl {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .config-val {
+            font-size: 0.85rem;
+            font-family: monospace;
+            color: var(--text-secondary);
+            word-break: break-all;
+        }
+
+        .timeline-wrapper {
+            margin-top: 1.5rem;
+            max-height: calc(100vh - 400px);
+            min-height: 200px;
+            overflow-y: auto;
+            padding-right: 8px;
+        }
+
+        .turn-block {
+            margin-bottom: 2rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            padding-bottom: 1.5rem;
+        }
+
+        .turn-block:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+
+        .turn-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .turn-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--accent-primary);
+        }
+
+        .turn-latency {
+            font-size: 0.85rem;
+            background-color: rgba(255, 255, 255, 0.05);
+            padding: 2px 8px;
+            border-radius: 4px;
+            color: var(--text-secondary);
+        }
+
+        .timeline-container {
+            position: relative;
+            padding-left: 20px;
+            border-left: 1px solid rgba(255, 255, 255, 0.1);
+            margin-left: 10px;
+        }
+
+        .timeline-event {
+            position: relative;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: baseline;
+            gap: 12px;
+        }
+
+        .timeline-event:last-child {
+            margin-bottom: 0;
+        }
+
+        .timeline-event::before {
+            content: '';
+            position: absolute;
+            left: -25px;
+            top: 6px;
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            background-color: var(--accent-primary);
+            border: 2px solid var(--bg-base);
+            transition: all 0.2s;
+        }
+
+        .timeline-event:hover::before {
+            transform: scale(1.3);
+            box-shadow: 0 0 8px var(--accent-primary);
+        }
+
+        .timeline-event.start-turn::before {
+            background-color: var(--accent-blue);
+            box-shadow: 0 0 8px rgba(59, 130, 246, 0.4);
+        }
+
+        .timeline-event.tts-event::before {
+            background-color: var(--accent-green);
+            box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
+        }
+
+        .timeline-event.llm-event::before {
+            background-color: var(--accent-primary);
+            box-shadow: 0 0 8px rgba(139, 92, 246, 0.4);
+        }
+
+        .timeline-event.stt-event::before {
+            background-color: #f59e0b;
+            /* Amber */
+            box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
+        }
+
+        .event-time {
+            font-family: monospace;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            min-width: 60px;
+        }
+
+        .event-desc {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        .timeline-detail-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 1.5rem;
+        }
+
+        .error-message {
+            background-color: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            color: #fca5a5;
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            font-size: 0.85rem;
+        }
+
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            min-height: 250px;
+            color: var(--text-muted);
+        }
+
+        .empty-state-icon {
+            margin-bottom: 12px;
+            opacity: 0.5;
+        }
+
+        .empty-list-message {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            padding: 1rem 0;
+        }
+
+        .empty-logs-message {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            padding: 2rem 0;
+        }
+
+        .empty-turns-message {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            text-align: center;
+            padding: 2rem 0;
+        }
+
+        .timeline-title {
+            font-size: 1.25rem;
+            font-family: 'Outfit', sans-serif;
+        }
+
+        .timeline-sid {
+            font-family: monospace;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        .timeline-timestamp {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .call-sid-sub {
+            opacity: 0.6;
+            font-family: monospace;
+        }
+
+        .badge-completed {
+            background-color: var(--accent-green-glow);
+            color: var(--accent-green);
+        }
+
+        .badge-failed {
+            background-color: rgba(239, 68, 68, 0.15);
+            color: var(--accent-red);
+        }
+
+        .breakdown-header {
+            font-size: 1rem;
+            border-bottom: 1px solid var(--border-muted);
+            padding-bottom: 8px;
+            margin-bottom: 12px;
+        }
+
+        #log-details-container {
+            min-height: 300px;
+        }
+
+        /* --- Latency Table & Grid CSS Styles --- */
+        .turn-body-grid {
+            display: grid;
+            grid-template-columns: 1.2fr 1fr;
+            gap: 1.5rem;
+            align-items: start;
+            margin-top: 0.75rem;
+        }
+
+        @media (max-width: 900px) {
+            .turn-body-grid {
+                grid-template-columns: 1fr;
+                gap: 1rem;
+            }
+        }
+
+        .turn-summary-column,
+        .turn-timeline-column {
+            width: 100%;
+        }
+
+        .legacy-fallback-message {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            background-color: rgba(255, 255, 255, 0.02);
+            border: 1px dashed var(--border-muted);
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .latency-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            background-color: rgba(255, 255, 255, 0.01);
+            border: 1px solid var(--border-muted);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .latency-table th,
+        .latency-table td {
+            padding: 8px 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-muted);
+            vertical-align: middle;
+        }
+
+        .latency-table th {
+            background-color: rgba(255, 255, 255, 0.03);
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .latency-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .latency-table tr:hover td {
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+
+        .latency-row-label {
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .latency-row-val {
+            font-family: monospace;
+            text-align: right;
+            color: var(--text-primary);
+        }
+
+        .latency-bar-cell {
+            width: 45%;
+        }
+
+        .latency-bar-container {
+            width: 100%;
+            height: 6px;
+            background-color: rgba(255, 255, 255, 0.05);
+            border-radius: 3px;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+        }
+
+        .latency-bar {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .latency-bar.user {
+            background: linear-gradient(90deg, #1d4ed8, #3b82f6);
+        }
+
+        .latency-bar.stt {
+            background: linear-gradient(90deg, #b45309, #f59e0b);
+        }
+
+        .latency-bar.llm {
+            background: linear-gradient(90deg, #6d28d9, #8b5cf6);
+        }
+
+        .latency-bar.tts {
+            background: linear-gradient(90deg, #047857, #10b981);
+        }
+
+        .latency-bar.text-agg {
+            background: linear-gradient(90deg, #4338ca, #6366f1);
+        }
+
+        .latency-bar.fn-call {
+            background: linear-gradient(90deg, #0e7490, #06b6d4);
+        }
+
+        .latency-bar.residual {
+            background: linear-gradient(90deg, #4b5563, #71717a);
+        }
+
+        .latency-bar.unmapped {
+            background: linear-gradient(90deg, #57534e, #78716c);
+        }
+
+        .latency-scale-lbl {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+            text-align: right;
+            display: block;
+        }
+
+        .unmapped-section {
+            margin-top: 0.75rem;
+            border: 1px solid var(--border-muted);
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+            background-color: rgba(255, 255, 255, 0.01);
+        }
+
+        .unmapped-title {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border-muted);
+            padding-bottom: 4px;
+        }
+
+        .unmapped-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .unmapped-item {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.75rem;
+            font-family: monospace;
+            color: var(--text-muted);
+        }
+
+        .unmapped-proc {
+            color: var(--text-secondary);
+        }
+
+        /* --- Config Snapshot Table Styles --- */
+        .config-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            border: 1px solid var(--border-muted);
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 1.5rem;
+        }
+
+        .config-table td {
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border-muted);
+        }
+
+        .config-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .config-table td:first-child {
+            font-weight: 600;
+            color: var(--text-muted);
+            background-color: rgba(255, 255, 255, 0.01);
+            width: 25%;
+        }
+
+        .config-table td:last-child {
+            font-family: monospace;
+            color: var(--text-secondary);
+            word-break: break-all;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <div class="brand">
+                <div class="brand-logo">Δ</div>
+                <div>
+                    <h1 class="brand-title">PipeCat Voice Agent</h1>
+                    <p class="brand-subtitle">Telemetry Dashboard & Outbound Operations</p>
+                </div>
+            </div>
+        </header>
+
+        <div class="grid-layout">
+            <!-- Left Side: Controls & Live Operations -->
+            <div>
+                <!-- Outbound Dialer Card -->
+                <div class="card">
+                    <h2 class="card-title">Outbound Dialer</h2>
+                    <div id="dialer-container">
+                        {% with part = 'dialer' %}
+                        {% include "dashboard.html" %}
+                        {% endwith %}
+                    </div>
+                </div>
+
+                <!-- Active Sessions Card -->
+                <div class="card">
+                    <h2 class="card-title">
+                        Active Sessions
+                        <span class="pulse-indicator"></span>
+                    </h2>
+                    <div id="active-sessions-container" hx-get="/dashboard/sessions" hx-trigger="every 2s"
+                        hx-swap="innerHTML">
+                        {% with part = 'sessions' %}
+                        {% include "dashboard.html" %}
+                        {% endwith %}
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Side: Analytics & Latency Telemetry -->
+            <div>
+                <!-- Historical Call Logs Card -->
+                <div class="card">
+                    <div class="card-title">
+                        <h2>Completed Call Logs</h2>
+                        <div class="card-header-actions">
+                            {% if db_connected is defined %}
+                            {% if db_connected %}
+                            <span class="status-badge connected">DB Online</span>
+                            {% else %}
+                            <span class="status-badge disconnected">DB Offline</span>
+                            {% endif %}
+                            {% endif %}
+                            <button class="btn btn-secondary btn-sm" hx-get="/dashboard/logs-list"
+                                hx-target="#logs-list-container" hx-swap="innerHTML">
+                                Refresh Logs
+                            </button>
+                        </div>
+                    </div>
+                    <div id="logs-list-container">
+                        {% with part = 'logs_list' %}
+                        {% include "dashboard.html" %}
+                        {% endwith %}
+                    </div>
+                </div>
+
+                <!-- Call Metrics Timeline Panel -->
+                <div class="card" id="log-details-container">
+                    <div class="empty-state">
+                        <svg class="empty-state-icon" xmlns="http://www.w3.org/2000/svg" width="48" height="48"
+                            fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                        </svg>
+                        <p>Select a completed call log to visualize its chronological latency timeline.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Active log highlight script -->
+    <script>
+        document.body.addEventListener('click', function (evt) {
+            const target = evt.target.closest('.log-item');
+            if (target) {
+                document.querySelectorAll('.log-item').forEach(el => el.classList.remove('active-detail'));
+                target.classList.add('active-detail');
+            }
+        });
+    </script>
+</body>
+
+</html>
+
+{% elif part == 'sessions' %}
+<div class="session-list">
+    {% if sessions %}
+    {% for session in sessions %}
+    <div class="session-item">
+        <div class="session-meta">
+            <span class="session-id">SID: {{ session.call_sid[:12] }}...</span>
+            <span class="session-info">Model: {{ session.config_snapshot.LLM_MODEL }}</span>
+        </div>
+        <span class="session-badge">
+            <span class="pulse-indicator"></span>
+            Active
+        </span>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="empty-list-message">
+        No active voice sessions.
+    </div>
+    {% endif %}
+</div>
+
+{% elif part == 'dialer' %}
+<form hx-post="/telephony/outbound" hx-target="#dialer-container" hx-swap="innerHTML">
+    <div class="form-group">
+        <label class="form-label" for="to_number">Customer Phone Number</label>
+        <input class="form-control" type="text" id="to_number" name="to_number"
+            placeholder="+919876543210 or 09876543210" required>
+    </div>
+    <button class="btn btn-primary" type="submit">
+        Trigger Outbound Call
+    </button>
+</form>
+
+{% elif part == 'outbound_status' %}
+{% if success %}
+<div class="dialer-status">
+    <div class="dialer-status-title">
+        <span class="pulse-indicator ringing"></span>
+        Ringing Customer
+    </div>
+    <div class="dialer-status-desc">
+        {{ to_number }}
+        <br>
+        <small class="call-sid-sub">Call SID: {{ call_sid }}</small>
+    </div>
+    <button class="btn btn-secondary" hx-get="/dashboard/dialer" hx-target="#dialer-container" hx-swap="innerHTML">
+        Dial Another
+    </button>
+</div>
+{% else %}
+<div class="dialer-status error">
+    <div class="dialer-status-title badge-failed">
+        Call Attempt Failed
+    </div>
+    <div class="dialer-status-desc dialer-status-desc-error">
+        {{ error }}
+    </div>
+    <button class="btn btn-secondary" hx-get="/dashboard/dialer" hx-target="#dialer-container" hx-swap="innerHTML">
+        Try Again
+    </button>
+</div>
+{% endif %}
+
+{% elif part == 'logs_list' %}
+<div class="logs-list">
+    {% if logs %}
+    {% for log in logs %}
+    <div class="log-item" hx-get="/dashboard/logs/{{ log.call_sid }}" hx-target="#log-details-container"
+        hx-swap="innerHTML">
+        <div class="log-meta">
+            <span class="log-sid">{{ log.call_sid[:16] }}...</span>
+            <span class="log-date">{{ log.created_at }}</span>
+        </div>
+        <div class="log-stats">
+            <span class="log-turns">{{ log.metrics.turn_count }} turns</span>
+            {% if log.completed and not log.error %}
+            <span class="log-badge-success">Success</span>
+            {% else %}
+            <span class="log-badge-failed">Failed</span>
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="empty-logs-message">
+        No completed call logs in MongoDB.
+    </div>
+    {% endif %}
+</div>
+
+{% elif part == 'timeline' %}
+<div class="timeline-detail-header">
+    <div>
+        <h3 class="timeline-title">Call Log Details</h3>
+        <p class="timeline-sid">
+            Call SID: {{ log.call_sid }}
+        </p>
+        <p class="timeline-timestamp">
+            Answered: {{ log.created_at }}
+        </p>
+    </div>
+    <div>
+        {% if log.completed and not log.error %}
+        <span class="session-badge badge-completed">Completed</span>
+        {% else %}
+        <span class="session-badge badge-failed">Failed</span>
+        {% endif %}
+    </div>
+</div>
+
+{% if log.error %}
+<div class="error-message">
+    <strong>Error Cause:</strong> {{ log.error }}
+</div>
+{% endif %}
+
+<!-- Key Metrics Grid -->
+<div class="metric-grid">
+    <div class="metric-card">
+        <div class="metric-lbl">First Bot speech</div>
+        <div class="metric-val">
+            {% if log.metrics.first_bot_speech_latency_secs is not none %}
+            {{ "%.3f"|format(log.metrics.first_bot_speech_latency_secs) }}s
+            {% else %}
+            —
+            {% endif %}
+        </div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-lbl">Total Turns</div>
+        <div class="metric-val">{{ log.metrics.turn_count }}</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-lbl">Avg Turn Latency</div>
+        <div class="metric-val">
+            {% if avg_latency is not none %}
+            {{ "%.3f"|format(avg_latency) }}s
+            {% else %}
+            —
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Configuration Snapshot -->
+{% if log.config_snapshot %}
+<table class="config-table">
+    <tr>
+        <td>LLM Model</td>
+        <td>{{ log.config_snapshot.LLM_MODEL | default('N/A', true) }}</td>
+    </tr>
+    <tr>
+        <td>TTS Voice ID</td>
+        <td>{{ log.config_snapshot.TTS_VOICE_ID | default('N/A', true) }}</td>
+    </tr>
+    <tr>
+        <td>TTS Model</td>
+        <td>{{ log.config_snapshot.TTS_MODEL | default('N/A', true) }}</td>
+    </tr>
+    <tr>
+        <td>Initial Greeting</td>
+        <td>{{ log.config_snapshot.INITIAL_GREETING_PROMPT | default('N/A', true) }}</td>
+    </tr>
+</table>
+{% endif %}
+
+<!-- Chronological Latency Timeline -->
+<h4 class="breakdown-header">
+    Turn-by-Turn Latency Breakdown
+</h4>
+
+<div class="timeline-wrapper">
+    {% if log.metrics.turns %}
+    {% for turn in log.metrics.turns %}
+    <div class="turn-block">
+        <div class="turn-header">
+            <span class="turn-title">Turn #{{ loop.index }}</span>
+            {% if turn.user_bot_latency_secs is not none %}
+            <span class="turn-latency">Total latency: {{ "%.3f"|format(turn.user_bot_latency_secs) }}s</span>
+            {% endif %}
+        </div>
+
+        {% set summary = turn.latency_summary if turn.latency_summary is defined else none %}
+        {% if summary %}
+        {% set user_val = summary.user_turn_secs | default(0.0) | float if summary.user_turn_secs is not none else 0.0
+        %}
+        {% set stt_val = summary.stt_ttfb_secs | default(0.0) | float if summary.stt_ttfb_secs is not none else 0.0 %}
+        {% set llm_val = summary.llm_ttfb_secs | default(0.0) | float if summary.llm_ttfb_secs is not none else 0.0 %}
+        {% set tts_val = summary.tts_ttfb_secs | default(0.0) | float if summary.tts_ttfb_secs is not none else 0.0 %}
+        {% set text_agg_val = summary.text_aggregation_secs | default(0.0) | float if summary.text_aggregation_secs is
+        not none else 0.0 %}
+        {% set fn_call_val = summary.function_call_secs_total | default(0.0) | float if summary.function_call_secs_total
+        is not none else 0.0 %}
+        {% set residual_val = summary.residual_secs | default(0.0) | float if summary.residual_secs is not none else 0.0
+        %}
+
+        {% set unmapped_sum = 0.0 %}
+        {% if summary.unmapped_ttfb_entries %}
+        {% set unmapped_sum = summary.unmapped_ttfb_entries | map(attribute='duration_secs') | sum | float %}
+        {% endif %}
+
+        {% set sum_visible = user_val + stt_val + llm_val + tts_val + text_agg_val + fn_call_val + residual_val +
+        unmapped_sum %}
+        {% set total_lat = summary.total_latency_secs | default(0.0) | float if summary.total_latency_secs is not none
+        else 0.0 %}
+
+        {% if total_lat > 0.0 and sum_visible <= total_lat %} {% set D=total_lat %} {% set scale_mode="total" %} {% else
+            %} {% set visible_vals=[user_val, stt_val, llm_val, tts_val, text_agg_val, fn_call_val, residual_val,
+            unmapped_sum] %} {% set ns=namespace(max_val=0.001) %} {% for val in visible_vals %} {% if val> ns.max_val
+            %}
+            {% set ns.max_val = val %}
+            {% endif %}
+            {% endfor %}
+            {% set D = ns.max_val %}
+            {% set scale_mode = "relative" %}
+            {% endif %}
+
+            <div class="turn-body-grid">
+                <!-- Left: Latency Summary Table -->
+                <div class="turn-summary-column">
+                    <table class="latency-table">
+                        <thead>
+                            <tr>
+                                <th>Segment</th>
+                                <th class="latency-bar-cell">Relative Duration</th>
+                                <th style="text-align: right;">Duration</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {# Core Rows - Always Shown #}
+                            <tr>
+                                <td>
+                                    <span class="latency-row-label">
+                                        <span class="pulse-indicator user"
+                                            style="width: 8px; height: 8px; animation: none; box-shadow: none;"></span>
+                                        User Speech
+                                    </span>
+                                </td>
+                                <td class="latency-bar-cell">
+                                    {% if summary.user_turn_secs is not none %}
+                                    <div class="latency-bar-container">
+                                        <div class="latency-bar user" style="width: {{ " %.1f"|format((user_val / D) *
+                                            100) }}%;"></div>
+                                    </div>
+                                    {% else %}
+                                    <span style="color: var(--text-muted);">—</span>
+                                    {% endif %}
+                                </td>
+                                <td class="latency-row-val">
+                                    {% if summary.user_turn_secs is not none %}
+                                    {{ "%.3f"|format(summary.user_turn_secs) }}s
+                                    {% else %}
+                                    —
+                                </td>
+                                {% endif %}
+                            </tr>
+                            <tr>
+                                <td>
+                                    <span class="latency-row-label">
+                                        <span class="pulse-indicator stt"
+                                            style="width: 8px; height: 8px; animation: none; box-shadow: none;"></span>
+                                        STT TTFB
+                                    </span>
+                                </td>
+                                <td class="latency-bar-cell">
+                                    {% if summary.stt_ttfb_secs is not none %}
+                                    <div class="latency-bar-container">
+                                        <div class="latency-bar stt" style="width: {{ " %.1f"|format((stt_val / D) *
+                                            100) }}%;"></div>
+                                    </div>
+                                    {% else %}
+                                    <span style="color: var(--text-muted);">—</span>
+                                    {% endif %}
+                                </td>
+                                <td class="latency-row-val">
+                                    {% if summary.stt_ttfb_secs is not none %}
+                                    {{ "%.3f"|format(summary.stt_ttfb_secs) }}s
+                                    {% else %}
+                                    —
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            <tr>
+                                <td>
+                                    <span class="latency-row-label">
+                                        <span class="pulse-indicator llm"
+                                            style="width: 8px; height: 8px; animation: none; box-shadow: none;"></span>
+                                        LLM TTFB
+                                    </span>
+                                </td>
+                                <td class="latency-bar-cell">
+                                    {% if summary.llm_ttfb_secs is not none %}
+                                    <div class="latency-bar-container">
+                                        <div class="latency-bar llm" style="width: {{ " %.1f"|format((llm_val / D) *
+                                            100) }}%;"></div>
+                                    </div>
+                                    {% else %}
+                                    <span style="color: var(--text-muted);">—</span>
+                                    {% endif %}
+                                </td>
+                                <td class="latency-row-val">
+                                    {% if summary.llm_ttfb_secs is not none %}
+                                    {{ "%.3f"|format(summary.llm_ttfb_secs) }}s
+                                    {% else %}
+                                    —
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            <tr>
+                                <td>
+                                    <span class="latency-row-label">
+                                        <span class="pulse-indicator tts"
+                                            style="width: 8px; height: 8px; animation: none; box-shadow: none;"></span>
+                                        TTS TTFB
+                                    </span>
+                                </td>
+                                <td class="latency-bar-cell">
+                                    {% if summary.tts_ttfb_secs is not none %}
+                                    <div class="latency-bar-container">
+                                        <div class="latency-bar tts" style="width: {{ " %.1f"|format((tts_val / D) *
+                                            100) }}%;"></div>
+                                    </div>
+                                    {% else %}
+                                    <span style="color: var(--text-muted);">—</span>
+                                    {% endif %}
+                                </td>
+                                <td class="latency-row-val">
+                                    {% if summary.tts_ttfb_secs is not none %}
+                                    {{ "%.3f"|format(summary.tts_ttfb_secs) }}s
+                                    {% else %}
+                                    —
+                                    {% endif %}
+                                </td>
+                            </tr>
+
+                            {# Optional Rows - Conditionally Shown #}
+                            {% if summary.text_aggregation_secs is not none %}
+                            <tr>
+                                <td>
+                                    <span class="latency-row-label">
+                                        <span class="pulse-indicator text-agg"
+                                            style="width: 8px; height: 8px; animation: none; box-shadow: none;"></span>
+                                        Text Aggregation
+                                    </span>
+                                </td>
+                                <td class="latency-bar-cell">
+                                    <div class="latency-bar-container">
+                                        <div class="latency-bar text-agg" style="width: {{ " %.1f"|format((text_agg_val
+                                            / D) * 100) }}%;"></div>
+                                    </div>
+                                </td>
+                                <td class="latency-row-val">
+                                    {{ "%.3f"|format(summary.text_aggregation_secs) }}s
+                                </td>
+                            </tr>
+                            {% endif %}
+                            {% if summary.function_call_secs_total is not none %}
+                            <tr>
+                                <td>
+                                    <span class="latency-row-label">
+                                        <span class="pulse-indicator fn-call"
+                                            style="width: 8px; height: 8px; animation: none; box-shadow: none;"></span>
+                                        Function Calls (Total)
+                                    </span>
+                                </td>
+                                <td class="latency-bar-cell">
+                                    <div class="latency-bar-container">
+                                        <div class="latency-bar fn-call" style="width: {{ " %.1f"|format((fn_call_val /
+                                            D) * 100) }}%;"></div>
+                                    </div>
+                                </td>
+                                <td class="latency-row-val">
+                                    {{ "%.3f"|format(summary.function_call_secs_total) }}s
+                                </td>
+                            </tr>
+                            {% endif %}
+                            {% if unmapped_sum > 0.0 %}
+                            <tr>
+                                <td>
+                                    <span class="latency-row-label">
+                                        <span class="pulse-indicator unmapped"
+                                            style="width: 8px; height: 8px; animation: none; box-shadow: none;"></span>
+                                        Other / Unmapped
+                                    </span>
+                                </td>
+                                <td class="latency-bar-cell">
+                                    <div class="latency-bar-container">
+                                        <div class="latency-bar unmapped" style="width: {{ " %.1f"|format((unmapped_sum
+                                            / D) * 100) }}%;"></div>
+                                    </div>
+                                </td>
+                                <td class="latency-row-val">
+                                    {{ "%.3f"|format(unmapped_sum) }}s
+                                </td>
+                            </tr>
+                            {% endif %}
+                            {% if summary.residual_secs is not none %}
+                            <tr>
+                                <td>
+                                    <span class="latency-row-label">
+                                        <span class="pulse-indicator residual"
+                                            style="width: 8px; height: 8px; animation: none; box-shadow: none;"></span>
+                                        Residual (Overhead)
+                                    </span>
+                                </td>
+                                <td class="latency-bar-cell">
+                                    <div class="latency-bar-container">
+                                        <div class="latency-bar residual" style="width: {{ " %.1f"|format((residual_val
+                                            / D) * 100) }}%;"></div>
+                                    </div>
+                                </td>
+                                <td class="latency-row-val">
+                                    {{ "%.3f"|format(summary.residual_secs) }}s
+                                </td>
+                            </tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                    {% if scale_mode == "total" %}
+                    <span class="latency-scale-lbl">Bars show % share of total turn latency ({{ "%.3f"|format(total_lat)
+                        }}s)</span>
+                    {% else %}
+                    <span class="latency-scale-lbl">Bars show duration relative to longest segment ({{ "%.3f"|format(D)
+                        }}s)</span>
+                    {% endif %}
+
+                    {# Unmapped processors sub-table list #}
+                    {% if summary.unmapped_ttfb_entries %}
+                    <div class="unmapped-section">
+                        <div class="unmapped-title">Other / Unmapped Processors</div>
+                        <div class="unmapped-list">
+                            {% for entry in summary.unmapped_ttfb_entries %}
+                            <div class="unmapped-item">
+                                <span class="unmapped-proc">{{ entry.processor }}</span>
+                                <span>{{ "%.3f"|format(entry.duration_secs) }}s</span>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+
+                <!-- Right: Raw Timeline Log -->
+                <div class="turn-timeline-column">
+                    <div class="timeline-container">
+                        {% set base_time = turn.latency_events[0].time if turn.latency_events else 0 %}
+                        {% for event in turn.latency_events %}
+                        {% set offset = event.time - base_time %}
+                        {% set is_tts = 'Cartesia' in event.event or 'TTS' in event.event or 'tts' in event.event %}
+                        {% set is_llm = 'Cerebras' in event.event or 'LLM' in event.event or 'llm' in event.event %}
+                        {% set is_stt = 'Deepgram' in event.event or 'STT' in event.event or 'stt' in event.event %}
+                        {% set is_start = 'User turn' in event.event or 'Start' in event.event %}
+                        <div
+                            class="timeline-event {% if is_tts %}tts-event{% elif is_llm %}llm-event{% elif is_stt %}stt-event{% elif is_start %}start-turn{% endif %}">
+                            <span class="event-time">+{{ "%.3f"|format(offset) }}s</span>
+                            <span class="event-desc">{{ event.event }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            {% else %}
+            {# Fallback mode for legacy logs #}
+            <div class="legacy-fallback-message">
+                Legacy log: Detailed latency summary table unavailable. Raw chronological trace displayed below.
+            </div>
+            <div class="timeline-container">
+                {% set base_time = turn.latency_events[0].time if turn.latency_events else 0 %}
+                {% for event in turn.latency_events %}
+                {% set offset = event.time - base_time %}
+                {% set is_tts = 'Cartesia' in event.event or 'TTS' in event.event or 'tts' in event.event %}
+                {% set is_llm = 'Cerebras' in event.event or 'LLM' in event.event or 'llm' in event.event %}
+                {% set is_stt = 'Deepgram' in event.event or 'STT' in event.event or 'stt' in event.event %}
+                {% set is_start = 'User turn' in event.event or 'Start' in event.event %}
+                <div
+                    class="timeline-event {% if is_tts %}tts-event{% elif is_llm %}llm-event{% elif is_stt %}stt-event{% elif is_start %}start-turn{% endif %}">
+                    <span class="event-time">+{{ "%.3f"|format(offset) }}s</span>
+                    <span class="event-desc">{{ event.event }}</span>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="empty-turns-message">
+        No metrics turns recorded for this call.
+    </div>
+    {% endif %}
+</div>
+{% endif %}

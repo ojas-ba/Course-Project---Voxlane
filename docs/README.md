@@ -15,3 +15,7 @@ This repository contains a local-development voice agent prototype using FastAPI
 - Read `docs/current/CONFIGURATION.md`
 - Read `docs/current/RUNTIME_FLOW.md`
 - For V2 work, begin with `docs/plans/VOICE_AGENT_V2_REBUILD_PLAN.md`
+
+## Main V2 Specification
+
+- docs/specs/VOICE_AGENT_V2_SPEC.md - source-of-truth engineering specification for the V2 rebuild.

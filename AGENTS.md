@@ -1,5 +1,7 @@
 # AGENTS.md - Voice Agent Global Rules
 
+Note: active project documentation has moved under `docs/README.md`; legacy phase/spec files are in `docs/archive/`.
+
 ## Mission
 
 You are an AI software engineer helping build a local-development voice agent system that uses Pipecat, Exotel telephony, Deepgram, Cerebras, Cartesia, FastAPI, and MongoDB-style persistence patterns.

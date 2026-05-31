@@ -1,20 +1,23 @@
-# VoiceAgent Pipecat
+# Voice Agent Project
 
-Local-development voice agent scaffold built around FastAPI, Pipecat, Exotel transport expectations, and phased implementation documents.
+Current documentation lives in:
 
-## Status
+- `docs/README.md`
+- `docs/current/ARCHITECTURE.md`
+- `docs/current/CONFIGURATION.md`
+- `docs/current/RUNTIME_FLOW.md`
+- `docs/plans/VOICE_AGENT_V2_REBUILD_PLAN.md`
 
-The repository is currently in `PHASE_0_SETUP.md`. Only setup-safe skeleton code and documentation are expected to exist at this stage.
+Historical phase/spec notes are archived under:
 
-## Phase Workflow
+- `docs/archive/`
 
-1. Review `AGENTS.md`, `PROJECT_SPEC.md`, `TECHNICAL_PLAN.md`, and the active `PHASE_*.md` file.
-2. Confirm the phase gate in `PHASE_PROGRESS.md`.
-3. Implement only the active phase scope.
-4. Run only the allowed verification steps for that phase.
-5. Update `PHASE_PROGRESS.md` and `NOTES.md`.
-6. Stop for human review before the next phase.
+For the V2 rebuild, start with:
 
-## Planned Layout
+- `docs/plans/VOICE_AGENT_V2_REBUILD_PLAN.md`
 
-See `TECHNICAL_PLAN.md` for the fixed repository layout and structural contracts for later phases.
+---
+
+## Legacy README Snapshot
+
+The previous root README content has been preserved in `docs/archive/old_notes/README_LEGACY.md`.

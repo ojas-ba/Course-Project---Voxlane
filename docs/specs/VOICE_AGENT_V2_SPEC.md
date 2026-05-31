@@ -406,6 +406,20 @@ Once a call starts, changes in the UI must not affect that active call.
 
 Call logs must persist the snapshot used for that call.
 
+### 9.3 V2 configuration implementation rule
+
+For V2, behavior config should move out of `.env`, but this can be implemented incrementally.
+
+Minimum Phase 1 requirement:
+
+- keep secrets and infrastructure in `.env`
+- introduce BotProfile / FlowDefinition / ProviderConfig models
+- provide default seeded configs so the app works immediately
+- allow dashboard selection/editing of behavior config
+- preserve immutable config snapshots for active and completed calls
+
+The first implementation does not need a polished production-grade config UI. A simple dashboard form or JSON editor is acceptable.
+
 ---
 
 ## 10. Data Models
@@ -517,7 +531,21 @@ class GreetingConfig(BaseModel):
     fallback_text: str
 ```
 
-### 10.6 `FlowDefinition`
+### 10.6 ProviderConfig storage rule
+
+Provider configs may be stored as separate typed records:
+
+- STTConfig
+- LLMConfig
+- TTSConfig
+
+or under a generic provider config collection if simpler for V2.
+
+The app must still validate provider-specific fields with typed Pydantic models before use.
+
+Do not pass raw unvalidated UI config directly into the live pipeline.
+
+### 10.7 `FlowDefinition`
 
 ```python
 class FlowDefinition(BaseModel):
@@ -544,7 +572,7 @@ class FlowDefinition(BaseModel):
     updated_at: datetime
 ```
 
-### 10.7 `SlotDefinition`
+### 10.8 `SlotDefinition`
 
 ```python
 class SlotDefinition(BaseModel):
@@ -564,7 +592,7 @@ class SlotDefinition(BaseModel):
     max_attempts: int = 2
 ```
 
-### 10.8 `FlowNode`
+### 10.9 `FlowNode`
 
 ```python
 class FlowNode(BaseModel):
@@ -590,7 +618,7 @@ class FlowNode(BaseModel):
     on_error_node_id: str | None = None
 ```
 
-### 10.9 `ConversationState`
+### 10.10 `ConversationState`
 
 ```python
 class ConversationState(BaseModel):
@@ -621,7 +649,7 @@ class ConversationState(BaseModel):
     updated_at: datetime
 ```
 
-### 10.10 `SlotState`
+### 10.11 `SlotState`
 
 ```python
 class SlotState(BaseModel):
@@ -643,7 +671,7 @@ class SlotState(BaseModel):
     source_text: str | None = None
 ```
 
-### 10.11 `TurnInput`
+### 10.12 `TurnInput`
 
 ```python
 class TurnInput(BaseModel):
@@ -662,7 +690,7 @@ class TurnInput(BaseModel):
     provider_metadata: dict = {}
 ```
 
-### 10.12 `TurnResult`
+### 10.13 `TurnResult`
 
 ```python
 class TurnResult(BaseModel):
@@ -765,6 +793,14 @@ StartOfTurn: potential barge-in signal, but do not overreact
 ```
 
 Do not enable speculative eager response behavior yet.
+
+TurnCollector V2 should be conservative.
+
+It should prefer slightly slower but correct turn commits over fast but interrupting behavior.
+
+It should not use `EagerEndOfTurn` to trigger bot speech in V2.
+
+If `EagerEndOfTurn` and `TurnResumed` are available, they may be logged for future latency experiments, but they must not drive assistant response generation yet.
 
 ### 12.3 Fragment handling
 
@@ -988,6 +1024,21 @@ confirmation node
 closing node
 ```
 
+For the first V2 implementation, FlowDefinition does not need to support every possible conversation graph feature.
+
+Minimum required support:
+
+- ordered slot collection
+- readiness check
+- closing node
+- refusal path
+- fallback path
+- one question per turn
+- skip optional slot after max attempts
+- prevent asking collected/skipped slots again
+
+Advanced branching, external tools, and complex conditional routing are future work.
+
 ### 14.2 Flow interface
 
 ```python
@@ -1019,6 +1070,15 @@ Pipecat Flows should be evaluated after the base V2 bot works.
 ---
 
 ## 15. LLMAdapter Requirements
+
+The LLMAdapter should not own conversation policy.
+
+It should not decide the next slot globally.
+It should not reset phase.
+It should not ignore existing SlotState.
+It should not ask repeated questions.
+
+Its outputs are advisory and must be validated by ConversationRuntime before speech.
 
 ### 15.1 Bounded LLM usage
 
@@ -1132,6 +1192,10 @@ Cerebras completion responses can include `time_info` such as queue time, prompt
 ## 16. SpeechComposer Requirements
 
 SpeechComposer must convert `TurnResult` into safe assistant speech.
+
+SpeechComposer is the final safety layer before TTS.
+
+If assistant_text is empty, unsafe, too long, or repeats a completed slot question, SpeechComposer should replace it with a safe phase-aware fallback or next valid question.
 
 ### 16.1 Rules
 
@@ -1251,7 +1315,14 @@ Call Logs
 Must allow:
 
 ```text
-- create/edit mark active/inactive
+- create bot profile
+- edit bot profile
+- choose FlowDefinition
+- choose STT/LLM/TTS configs
+- edit greeting config
+- edit fallback policy
+- mark profile active/inactive
+- select profile for demo outbound call
 ```
 
 ### 18.3 Flow Definitions UI
@@ -1634,7 +1705,22 @@ Phase 10: Evaluate Pipecat Flows later
 
 ---
 
-## 25. Acceptance Criteria For This Spec
+## Phase 1 Readiness Criteria
+
+Phase 1 can start only when:
+
+- docs/specs/VOICE_AGENT_V2_SPEC.md is finalized
+- docs/README.md links to the spec
+- ADRs align with this spec
+- current tests are understood
+- live provider tests are either passing or clearly marked optional
+- no runtime behavior has been changed by docs/spec work
+
+Phase 1 implementation should start with config/profile foundations, not TurnCollector yet.
+
+---
+
+## 25. V2 Implementation Acceptance Criteria
 
 The V2 implementation should not be considered complete until:
 
@@ -1655,40 +1741,6 @@ The V2 implementation should not be considered complete until:
 ```
 
 ---
-
-## 26. Update Required In `docs/README.md`
-
-After creating this spec, update `docs/README.md` to include:
-
-```md
-## Main V2 Specification
-
-- `docs/specs/VOICE_AGENT_V2_SPEC.md` — source-of-truth engineering specification for the V2 rebuild.
-```
-
-Also update any source-of-truth map if present.
-
----
-
-## 27. Important Instruction To Agent
-
-Do not start implementation after writing this spec.
-
-This task is complete when:
-
-```text
-- docs/specs/VOICE_AGENT_V2_SPEC.md exists
-- docs/README.md links to it
-- no runtime code changed
-- no secrets changed
-- no tests were modified unless only documentation references required it
-```
-
-Suggested commit message:
-
-```text
-docs: add voice agent v2 engineering spec
-```
 
 [1]: https://docs.pipecat.ai/pipecat-flows/introduction "Pipecat Flows - Pipecat"
 [2]: https://docs.pipecat.ai/pipecat/learn/speech-input "Speech Input & Turn Detection - Pipecat"

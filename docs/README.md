@@ -18,4 +18,20 @@ This repository contains a local-development voice agent prototype using FastAPI
 
 ## Main V2 Specification
 
-- docs/specs/VOICE_AGENT_V2_SPEC.md - source-of-truth engineering specification for the V2 rebuild.
+- `docs/specs/VOICE_AGENT_V2_SPEC.md` - source-of-truth engineering specification for the V2 rebuild.
+
+## Source-Of-Truth Priority
+
+1. `docs/specs/VOICE_AGENT_V2_SPEC.md`
+2. `docs/decisions/`
+3. `docs/current/`
+4. `docs/plans/`
+5. `docs/archive/`
+
+Meaning:
+
+- spec defines what to build
+- ADRs define fixed decisions
+- current docs explain architecture/runtime
+- plans explain implementation order
+- archive is historical reference only

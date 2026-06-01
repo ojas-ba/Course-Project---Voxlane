@@ -46,6 +46,7 @@ from pipecat.turns.user_mute import (
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
 from app.config import Settings, V1_SAMPLE_RATE
+from app.models.conversation_models import TurnCollectionResult, TurnEvent, TurnInput
 from app.runtime import (
     ConfigSnapshot,
     append_session_transcript_event,
@@ -57,6 +58,7 @@ from app.services.conversation_controller import (
     apply_turn_decision,
     decide_next_turn,
 )
+from app.services.turn_collector import TurnCollector, utc_now
 from app.utils.metrics_logger import build_turn_metrics
 
 
@@ -139,23 +141,32 @@ def _normalize_transcript_text(text: str) -> str:
 
 
 class UserConversationProcessor(FrameProcessor):
-    """Route finalized user utterances through the structured controller."""
+    """Route committed user turns through the temporary legacy controller bridge."""
 
     def __init__(
         self,
         *,
         call_sid: str,
+        stream_sid: str | None = None,
         state: ConversationRuntimeState,
         snapshot: ConfigSnapshot,
         settings: Settings,
         opening_mode: Literal["outbound", "default"] = "default",
+        turn_collector: TurnCollector | None = None,
     ) -> None:
         super().__init__()
         self._call_sid = call_sid
+        self._stream_sid = stream_sid
         self._state = state
         self._snapshot = snapshot
         self._settings = settings
         self._opening_mode = opening_mode
+        self._turn_collector = turn_collector or TurnCollector(
+            call_sid=call_sid,
+            stream_sid=stream_sid,
+        )
+        self._turn_processing_lock = asyncio.Lock()
+        self.last_turn_collection_result: TurnCollectionResult | None = None
 
     async def process_frame(
         self,
@@ -169,50 +180,134 @@ class UserConversationProcessor(FrameProcessor):
             self._state.phase = "awaiting_readiness" if self._opening_mode == "outbound" else "task"
 
         if direction == FrameDirection.DOWNSTREAM and isinstance(frame, TranscriptionFrame) and frame.finalized:
-            cleaned_text = _normalize_transcript_text(frame.text)
-            if cleaned_text:
-                if self._state.greeting_audio_pending:
-                    return
-
-                self._state.last_user_text = cleaned_text
-                user_phase = "readiness" if self._state.phase == "awaiting_readiness" else self._state.phase
-                append_session_transcript_event(
-                    self._call_sid,
-                    role="user",
-                    phase=user_phase if user_phase in {"readiness", "task", "closing"} else "task",
-                    text=cleaned_text,
+            result = self._observe_turn_event(
+                TurnEvent(
+                    event_type="final_transcript",
+                    text=frame.text,
+                    timestamp=utc_now(),
+                    metadata={
+                        "pipecat_frame": "TranscriptionFrame",
+                        "result": getattr(frame, "result", None) or {},
+                    },
                 )
-                self._state.recent_events.append(
-                    {"role": "user", "phase": user_phase, "text": cleaned_text}
-                )
-                decision = await decide_next_turn(
-                    user_text=cleaned_text,
-                    state=self._state,
-                    snapshot=self._snapshot,
-                    settings=self._settings,
-                )
-                apply_turn_decision(self._state, decision)
-                assistant_phase = "closing" if self._state.phase == "closing" else decision.phase
-                self._state.recent_events.append(
-                    {
-                        "role": "assistant",
-                        "phase": assistant_phase,
-                        "text": decision.assistant_text,
-                    }
-                )
-                append_session_transcript_event(
-                    self._call_sid,
-                    role="assistant",
-                    phase=assistant_phase,
-                    text=decision.assistant_text,
-                )
-                await self.push_frame(
-                    TTSSpeakFrame(decision.assistant_text, append_to_context=True),
-                    FrameDirection.DOWNSTREAM,
-                )
+            )
+            self._log_turn_collection_result(result)
+            if self._state.greeting_audio_pending:
                 return
 
         await self.push_frame(frame, direction)
+
+    async def handle_end_of_turn(self, transcript: str | None) -> TurnCollectionResult:
+        """Handle Deepgram Flux EndOfTurn through the same collector bridge."""
+
+        result = self._observe_turn_event(
+            TurnEvent(
+                event_type="end_of_turn",
+                text=transcript,
+                timestamp=utc_now(),
+                metadata={"event_handler": "on_end_of_turn"},
+            )
+        )
+        self._log_turn_collection_result(result)
+        if result.turn is not None:
+            await self._handle_committed_turn(result.turn)
+        return result
+
+    async def handle_reference_turn_event(
+        self,
+        *,
+        event_type: Literal["update", "eager_end_of_turn", "turn_resumed"],
+        transcript: str | None = None,
+    ) -> TurnCollectionResult:
+        """Record non-committing Flux turn events for debug/reference only."""
+
+        result = self._observe_turn_event(
+            TurnEvent(
+                event_type=event_type,
+                text=transcript,
+                timestamp=utc_now(),
+                metadata={"event_handler": f"on_{event_type}"},
+            )
+        )
+        self._log_turn_collection_result(result)
+        return result
+
+    def _observe_turn_event(self, event: TurnEvent) -> TurnCollectionResult:
+        phase = "readiness" if self._state.phase == "awaiting_readiness" else self._state.phase
+        result = self._turn_collector.observe(
+            event,
+            phase=phase,
+            greeting_pending=self._state.greeting_audio_pending,
+        )
+        self.last_turn_collection_result = result
+        return result
+
+    async def _handle_committed_turn(self, turn: TurnInput) -> None:
+        if self._turn_processing_lock.locked():
+            self.last_turn_collection_result = TurnCollectionResult(
+                ignored_reason="turn_processing",
+                commit_source=turn.source,
+                commit_timestamp=turn.committed_at,
+                provider_turn_index=turn.provider_metadata.get("provider_turn_index"),
+            )
+            logger.info(
+                "Committed turn suppressed while previous turn is processing",
+                call_sid=self._call_sid,
+                turn_index=turn.turn_index,
+                ignored_reason="turn_processing",
+            )
+            return
+
+        async with self._turn_processing_lock:
+            self._state.last_user_text = turn.normalized_text
+            user_phase = "readiness" if self._state.phase == "awaiting_readiness" else self._state.phase
+            append_session_transcript_event(
+                self._call_sid,
+                role="user",
+                phase=user_phase if user_phase in {"readiness", "task", "closing"} else "task",
+                text=turn.normalized_text,
+            )
+            self._state.recent_events.append(
+                {"role": "user", "phase": user_phase, "text": turn.normalized_text}
+            )
+            decision = await decide_next_turn(
+                user_text=turn.normalized_text,
+                state=self._state,
+                snapshot=self._snapshot,
+                settings=self._settings,
+            )
+            apply_turn_decision(self._state, decision)
+            assistant_phase = "closing" if self._state.phase == "closing" else decision.phase
+            self._state.recent_events.append(
+                {
+                    "role": "assistant",
+                    "phase": assistant_phase,
+                    "text": decision.assistant_text,
+                }
+            )
+            append_session_transcript_event(
+                self._call_sid,
+                role="assistant",
+                phase=assistant_phase,
+                text=decision.assistant_text,
+            )
+            await self.push_frame(
+                TTSSpeakFrame(decision.assistant_text, append_to_context=True),
+                FrameDirection.DOWNSTREAM,
+            )
+
+    def _log_turn_collection_result(self, result: TurnCollectionResult) -> None:
+        if result.ignored_reason is None and result.turn is None:
+            return
+        logger.info(
+            "Turn collection result",
+            call_sid=self._call_sid,
+            ignored_reason=result.ignored_reason,
+            commit_source=result.commit_source,
+            provider_turn_index=result.provider_turn_index,
+            duplicate_suppressed=result.duplicate_suppressed,
+            greeting_pending_suppressed=result.greeting_pending_suppressed,
+        )
 
 
 def _record_greeting(
@@ -238,6 +333,7 @@ def _build_pipeline_processors(
     snapshot: ConfigSnapshot,
     settings: Settings,
     call_sid: str,
+    stream_sid: str | None = None,
     opening_mode: Literal["outbound", "default"] = "default",
     conversation_state: ConversationRuntimeState | None = None,
 ) -> list[Any]:
@@ -250,17 +346,42 @@ def _build_pipeline_processors(
     conversation_state = conversation_state or ConversationRuntimeState(
         phase="greeting" if opening_mode == "outbound" else "task"
     )
+    conversation_processor = UserConversationProcessor(
+        call_sid=call_sid,
+        stream_sid=stream_sid,
+        state=conversation_state,
+        snapshot=snapshot,
+        settings=settings,
+        opening_mode=opening_mode,
+    )
+
+    if hasattr(stt, "event_handler"):
+        @stt.event_handler("on_end_of_turn")
+        async def _on_end_of_turn(service: Any, transcript: str) -> None:
+            await conversation_processor.handle_end_of_turn(transcript)
+
+        @stt.event_handler("on_eager_end_of_turn")
+        async def _on_eager_end_of_turn(service: Any, transcript: str) -> None:
+            await conversation_processor.handle_reference_turn_event(
+                event_type="eager_end_of_turn",
+                transcript=transcript,
+            )
+
+        @stt.event_handler("on_turn_resumed")
+        async def _on_turn_resumed(service: Any) -> None:
+            await conversation_processor.handle_reference_turn_event(event_type="turn_resumed")
+
+        @stt.event_handler("on_update")
+        async def _on_update(service: Any, transcript: str) -> None:
+            await conversation_processor.handle_reference_turn_event(
+                event_type="update",
+                transcript=transcript,
+            )
 
     return [
         transport.input(),
         stt,
-        UserConversationProcessor(
-            call_sid=call_sid,
-            state=conversation_state,
-            snapshot=snapshot,
-            settings=settings,
-            opening_mode=opening_mode,
-        ),
+        conversation_processor,
         aggregator_pair.user(),
         tts,
         aggregator_pair.assistant(),
@@ -331,6 +452,7 @@ async def run_pipeline(
             snapshot=snapshot,
             settings=settings,
             call_sid=call_sid,
+            stream_sid=stream_sid,
             opening_mode=opening_mode,
             conversation_state=conversation_state,
         )

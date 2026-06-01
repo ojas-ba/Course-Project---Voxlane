@@ -11,6 +11,8 @@ Use this file for durable working memory across implementation sessions.
 ## Decisions
 
 - The project is voice-agent-specific, not a generic scaffold.
+- V2 Phase 2 TurnCollector gates assistant responses on committed Deepgram Flux EndOfTurn events. Raw finalized `TranscriptionFrame` text may buffer transcript data but must not directly trigger `decide_next_turn()`.
+- V2 Phase 2 uses a temporary bridge from committed `TurnInput` to the existing `conversation_controller`; `ConversationRuntime`, `FlowRunner`, `LLMAdapter`, and `SpeechComposer` remain later-phase work.
 - Manual Exotel and voice validation remains human-owned.
 - AI-owned verification is limited to normal code-structure and flow validation.
 - Full phase documents are created up front so implementation can proceed without redefining process docs later.

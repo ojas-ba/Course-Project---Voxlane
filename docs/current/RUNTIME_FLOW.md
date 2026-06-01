@@ -7,12 +7,15 @@
 3. Exotel connects to WebSocket.
 4. Pipecat pipeline handles transport/STT/TTS.
 5. TurnCollector emits committed user turns.
-6. ConversationRuntime processes the turn.
+6. Phase 2 temporarily bridges committed turns through the legacy conversation controller.
 7. FlowRunner decides next use-case action.
 8. LLMAdapter performs bounded classification/extraction/phrasing.
 9. SpeechComposer creates final assistant text.
 10. Cartesia speaks response.
 11. Final call log is persisted after call completion.
+
+Later V2 phases replace the temporary legacy bridge with `ConversationRuntime`,
+`FlowRunner`, `LLMAdapter`, and `SpeechComposer`.
 
 ## Persistence And State Notes
 

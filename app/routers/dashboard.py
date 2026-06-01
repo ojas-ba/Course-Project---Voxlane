@@ -22,6 +22,7 @@ from app.runtime import (
     create_pending_outbound_context,
 )
 from app.services.conversation_controller import generate_outbound_greeting_text
+from app.services.config_repository import list_bot_profiles
 
 router = APIRouter()
 
@@ -56,6 +57,8 @@ async def get_dashboard(request: Request) -> Response:
     """Render the main single-page dashboard."""
 
     logs, db_connected = await _fetch_recent_logs()
+    settings = get_settings()
+    bot_profiles = list_bot_profiles(settings)
 
     return templates.TemplateResponse(
         request=request,
@@ -65,6 +68,8 @@ async def get_dashboard(request: Request) -> Response:
             "logs": logs,
             "active_count": len(ACTIVE_SESSIONS),
             "db_connected": db_connected,
+            "bot_profiles": bot_profiles,
+            "selected_bot_profile_id": bot_profiles[0]["id"] if bot_profiles else None,
         },
     )
 
@@ -87,11 +92,16 @@ async def get_active_sessions(request: Request) -> Response:
 async def get_dialer(request: Request) -> Response:
     """HTMX endpoint to retrieve the clean outbound dialer form."""
 
+    settings = get_settings()
+    bot_profiles = list_bot_profiles(settings)
+
     return templates.TemplateResponse(
         request=request,
         name="dashboard.html",
         context={
             "part": "dialer",
+            "bot_profiles": bot_profiles,
+            "selected_bot_profile_id": bot_profiles[0]["id"] if bot_profiles else None,
         },
     )
 
@@ -105,6 +115,9 @@ async def post_outbound(request: Request) -> Response:
     if not isinstance(to_number, str):
         to_number = ""
     to_number = to_number.strip()
+    bot_profile_id = form_data.get("bot_profile_id")
+    if not isinstance(bot_profile_id, str):
+        bot_profile_id = None
 
     if not to_number or not re.match(r"^\+?[1-9]\d{1,14}$", to_number):
         return templates.TemplateResponse(
@@ -136,7 +149,7 @@ async def post_outbound(request: Request) -> Response:
     if expired_count:
         logger.info("Expired pending outbound contexts cleaned", count=expired_count)
 
-    snapshot = build_config_snapshot(settings)
+    snapshot = build_config_snapshot(settings, profile_id=bot_profile_id)
     greeting_text: str | None = None
     greeting_error: str | None = None
 

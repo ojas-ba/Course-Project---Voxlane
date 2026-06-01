@@ -2,6 +2,8 @@ from unittest.mock import Mock
 
 import pytest
 
+from app.config import get_settings
+from app.runtime import build_config_snapshot
 from app.utils.metrics_logger import (
     build_turn_metrics,
     finalize_call_log,
@@ -223,3 +225,20 @@ def test_finalize_call_log_skips_incomplete_turns():
     assert call_log.transcript == []
     assert call_log.completed is False
     assert call_log.error == "User disconnected"
+
+
+def test_finalize_call_log_accepts_expanded_v2_snapshot():
+    snapshot = build_config_snapshot(get_settings())
+
+    call_log = finalize_call_log(
+        call_sid="call_123",
+        stream_sid="stream_456",
+        config_snapshot=snapshot,
+        metrics={},
+        transcript=[],
+        completed=True,
+        error=None,
+    )
+
+    assert call_log.config_snapshot["snapshot_version"] == "v2_phase1"
+    assert call_log.config_snapshot["bot_profile"]["id"] == "default_demo_bot"

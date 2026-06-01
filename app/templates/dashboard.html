@@ -1106,8 +1106,10 @@
     {% if sessions %}
     {% for session in sessions %}
     <div class="session-item">
+        {% set profile = session.config_snapshot.bot_profile | default({}, true) %}
         <div class="session-meta">
             <span class="session-id">SID: {{ session.call_sid[:12] }}...</span>
+            <span class="session-info">Profile: {{ profile.name | default('N/A', true) }}</span>
             <span class="session-info">Model: {{ session.config_snapshot.LLM_MODEL }}</span>
         </div>
         <span class="session-badge">
@@ -1125,6 +1127,18 @@
 
 {% elif part == 'dialer' %}
 <form hx-post="/telephony/outbound" hx-target="#dialer-container" hx-swap="innerHTML">
+    {% if bot_profiles is defined and bot_profiles %}
+    <div class="form-group">
+        <label class="form-label" for="bot_profile_id">Bot Profile</label>
+        <select class="form-control" id="bot_profile_id" name="bot_profile_id">
+            {% for profile in bot_profiles %}
+            <option value="{{ profile.id }}" {% if profile.id == selected_bot_profile_id %}selected{% endif %}>
+                {{ profile.name }}
+            </option>
+            {% endfor %}
+        </select>
+    </div>
+    {% endif %}
     <div class="form-group">
         <label class="form-label" for="to_number">Customer Phone Number</label>
         <input class="form-control" type="text" id="to_number" name="to_number"
@@ -1248,7 +1262,21 @@
 
 <!-- Configuration Snapshot -->
 {% if log.config_snapshot %}
+{% set profile = log.config_snapshot.bot_profile | default({}, true) %}
 <table class="config-table">
+    <tr>
+        <td>Snapshot Version</td>
+        <td>{{ log.config_snapshot.snapshot_version | default('legacy', true) }}</td>
+    </tr>
+    <tr>
+        <td>Bot Profile</td>
+        <td>
+            {{ profile.name | default('N/A', true) }}
+            {% if profile.id is defined %}
+            <br><small>{{ profile.id }}</small>
+            {% endif %}
+        </td>
+    </tr>
     <tr>
         <td>LLM Model</td>
         <td>{{ log.config_snapshot.LLM_MODEL | default('N/A', true) }}</td>

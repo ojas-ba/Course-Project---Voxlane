@@ -2,9 +2,10 @@
 
 from collections.abc import MutableMapping
 import time
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
-from app.config import Settings, V1_SAMPLE_RATE
+from app.config import Settings
+from app.services.config_repository import get_bot_profile_snapshot
 
 
 class ConfigSnapshot(TypedDict):
@@ -19,6 +20,15 @@ class ConfigSnapshot(TypedDict):
     INITIAL_GREETING_INSTRUCTIONS: str
     INITIAL_GREETING_FALLBACK_TEXT: str
     SAMPLE_RATE: int
+    snapshot_version: NotRequired[str]
+    bot_profile: NotRequired[dict[str, Any]]
+    stt_config: NotRequired[dict[str, Any]]
+    llm_config: NotRequired[dict[str, Any]]
+    tts_config: NotRequired[dict[str, Any]]
+    greeting_config: NotRequired[dict[str, Any]]
+    fallback_policy: NotRequired[dict[str, Any]]
+    flow_definition: NotRequired[dict[str, Any]]
+    profile_resolution: NotRequired[dict[str, Any]]
 
 
 class RuntimeSession(TypedDict):
@@ -59,43 +69,16 @@ ACTIVE_SESSIONS: MutableMapping[str, RuntimeSession] = {}
 PENDING_OUTBOUND_CALLS: MutableMapping[str, PendingOutboundContext] = {}
 
 
-def _looks_like_spoken_greeting(text: str) -> bool:
-    normalized = text.strip().lower()
-    readiness_cues = ("good time", "available", "ready", "continue", "speak", "talk")
-    return "." in normalized and ("?" in normalized or any(cue in normalized for cue in readiness_cues))
+def build_config_snapshot(
+    settings: Settings,
+    profile_id: str | None = None,
+) -> ConfigSnapshot:
+    """Create the legacy-compatible immutable config snapshot for a call."""
 
-
-def build_config_snapshot(settings: Settings) -> ConfigSnapshot:
-    """Create the fixed v1 runtime configuration snapshot for a call."""
-
-    legacy_greeting = settings.initial_greeting_prompt.strip()
-    fallback_text = settings.initial_greeting_fallback_text.strip()
-    instructions = settings.initial_greeting_instructions.strip()
-
-    if not fallback_text:
-        fallback_text = (
-            legacy_greeting
-            if _looks_like_spoken_greeting(legacy_greeting)
-            else "Hello. I am calling for a short conversation. Is now a good time?"
-        )
-    if not instructions:
-        instructions = (
-            "Generate a brief personalized outbound opening and ask whether now is a good time."
-            if _looks_like_spoken_greeting(legacy_greeting)
-            else legacy_greeting
-        )
-
-    return {
-        "SYSTEM_PROMPT": settings.system_prompt,
-        "LLM_MODEL": settings.llm_model,
-        "LLM_TEMPERATURE": settings.llm_temperature,
-        "TTS_VOICE_ID": settings.tts_voice_id,
-        "TTS_MODEL": settings.tts_model,
-        "INITIAL_GREETING_PROMPT": settings.initial_greeting_prompt,
-        "INITIAL_GREETING_INSTRUCTIONS": instructions,
-        "INITIAL_GREETING_FALLBACK_TEXT": fallback_text,
-        "SAMPLE_RATE": V1_SAMPLE_RATE,
-    }
+    return cast(
+        ConfigSnapshot,
+        get_bot_profile_snapshot(settings, profile_id=profile_id),
+    )
 
 
 def create_session(

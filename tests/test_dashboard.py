@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from main import app
 from app.runtime import ACTIVE_SESSIONS
+from app.services.config_repository import DEFAULT_BOT_PROFILE_ID
 
 @pytest.fixture
 def client():
@@ -26,6 +27,7 @@ def test_dashboard_render(client):
         assert "text/html" in response.headers["content-type"]
         assert "<title>Voice Agent Telemetry Dashboard</title>" in response.text
         assert "htmx.org" in response.text
+        assert "Default Demo Bot" in response.text
 
 def test_dashboard_sessions_empty(client):
     response = client.get("/dashboard/sessions")
@@ -46,6 +48,29 @@ def test_dashboard_sessions_active(client):
     response = client.get("/dashboard/sessions")
     assert response.status_code == 200
     assert "SID: test_call_si..." in response.text
+    assert "Model: test-model" in response.text
+
+
+def test_dashboard_sessions_active_with_v2_snapshot(client):
+    ACTIVE_SESSIONS["test_call_sid"] = {
+        "call_sid": "test_call_sid",
+        "stream_sid": "test_stream_sid",
+        "config_snapshot": {
+            "LLM_MODEL": "test-model",
+            "bot_profile": {
+                "id": DEFAULT_BOT_PROFILE_ID,
+                "name": "Default Demo Bot",
+            },
+        },
+        "metrics": {},
+        "transcript": [],
+        "first_latency": None,
+    }
+
+    response = client.get("/dashboard/sessions")
+
+    assert response.status_code == 200
+    assert "Profile: Default Demo Bot" in response.text
     assert "Model: test-model" in response.text
 
 
@@ -132,3 +157,35 @@ def test_dashboard_log_detail_shows_empty_transcript_state(client):
 
     assert response.status_code == 200
     assert "No transcript captured for this call." in response.text
+
+
+def test_dashboard_log_detail_renders_v2_snapshot_metadata(client):
+    log_document = {
+        "call_sid": "call_123",
+        "completed": True,
+        "error": None,
+        "config_snapshot": {
+            "snapshot_version": "v2_phase1",
+            "LLM_MODEL": "test-model",
+            "TTS_VOICE_ID": "test-voice",
+            "TTS_MODEL": "test-tts",
+            "INITIAL_GREETING_PROMPT": "Hi there",
+            "bot_profile": {
+                "id": DEFAULT_BOT_PROFILE_ID,
+                "name": "Default Demo Bot",
+            },
+        },
+        "metrics": {
+            "first_bot_speech_latency_secs": None,
+            "turn_count": 0,
+            "turns": [],
+        },
+    }
+
+    with patch("app.routers.dashboard.get_database", return_value=_FakeDatabase(log_document)):
+        response = client.get("/dashboard/logs/call_123")
+
+    assert response.status_code == 200
+    assert "v2_phase1" in response.text
+    assert "Default Demo Bot" in response.text
+    assert DEFAULT_BOT_PROFILE_ID in response.text

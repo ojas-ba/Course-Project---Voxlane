@@ -7,6 +7,7 @@ from main import app
 from app.runtime import PENDING_OUTBOUND_CALLS
 from app.services.exotel_client import ExotelCallResult, ExotelOutboundClient
 from app.config import Settings
+from app.services.config_repository import DEFAULT_BOT_PROFILE_ID
 
 @pytest.fixture
 def client():
@@ -54,6 +55,75 @@ def test_dashboard_outbound_creates_pending_context(client):
         "Hi, is now a good time to continue?"
     )
     assert PENDING_OUTBOUND_CALLS["call_123"]["config_snapshot"]["SAMPLE_RATE"] == 16000
+    assert (
+        PENDING_OUTBOUND_CALLS["call_123"]["config_snapshot"]["bot_profile"]["id"]
+        == DEFAULT_BOT_PROFILE_ID
+    )
+    assert (
+        PENDING_OUTBOUND_CALLS["call_123"]["config_snapshot"]["snapshot_version"]
+        == "v2_phase1"
+    )
+
+
+def test_dashboard_outbound_accepts_selected_profile_id(client):
+    mock_exotel_client = AsyncMock()
+    mock_exotel_client.make_call.return_value = ExotelCallResult(
+        success=True,
+        call_sid="call_456",
+    )
+    client.app.state.exotel_client = mock_exotel_client
+
+    with patch(
+        "app.routers.dashboard.generate_outbound_greeting_text",
+        new_callable=AsyncMock,
+    ) as mock_greeting:
+        mock_greeting.return_value = "Hi, is now a good time to continue?"
+        response = client.post(
+            "/telephony/outbound",
+            data={
+                "to_number": "+919876543210",
+                "bot_profile_id": DEFAULT_BOT_PROFILE_ID,
+            },
+        )
+
+    snapshot = PENDING_OUTBOUND_CALLS["call_456"]["config_snapshot"]
+    assert response.status_code == 200
+    assert snapshot["profile_resolution"] == {
+        "requested_profile_id": DEFAULT_BOT_PROFILE_ID,
+        "resolved_profile_id": DEFAULT_BOT_PROFILE_ID,
+        "used_fallback": False,
+    }
+
+
+def test_dashboard_outbound_unknown_profile_falls_back(client):
+    mock_exotel_client = AsyncMock()
+    mock_exotel_client.make_call.return_value = ExotelCallResult(
+        success=True,
+        call_sid="call_789",
+    )
+    client.app.state.exotel_client = mock_exotel_client
+
+    with patch(
+        "app.routers.dashboard.generate_outbound_greeting_text",
+        new_callable=AsyncMock,
+    ) as mock_greeting:
+        mock_greeting.return_value = "Hi, is now a good time to continue?"
+        response = client.post(
+            "/telephony/outbound",
+            data={
+                "to_number": "+919876543210",
+                "bot_profile_id": "does_not_exist",
+            },
+        )
+
+    snapshot = PENDING_OUTBOUND_CALLS["call_789"]["config_snapshot"]
+    assert response.status_code == 200
+    assert snapshot["bot_profile"]["id"] == DEFAULT_BOT_PROFILE_ID
+    assert snapshot["profile_resolution"] == {
+        "requested_profile_id": "does_not_exist",
+        "resolved_profile_id": DEFAULT_BOT_PROFILE_ID,
+        "used_fallback": True,
+    }
 
 @pytest.mark.asyncio
 async def test_exotel_outbound_client_success():

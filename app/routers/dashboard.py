@@ -13,7 +13,15 @@ from bson import ObjectId
 from loguru import logger
 
 from app.database import get_database
-from app.runtime import ACTIVE_SESSIONS
+from app.config import get_settings
+from app.runtime import (
+    ACTIVE_SESSIONS,
+    attach_pending_call_sid,
+    build_config_snapshot,
+    cleanup_expired_pending_outbound_contexts,
+    create_pending_outbound_context,
+)
+from app.services.conversation_controller import generate_outbound_greeting_text
 
 router = APIRouter()
 
@@ -121,9 +129,44 @@ async def post_outbound(request: Request) -> Response:
             },
         )
 
+    settings = get_settings()
+    expired_count = cleanup_expired_pending_outbound_contexts(
+        settings.pending_outbound_ttl_secs
+    )
+    if expired_count:
+        logger.info("Expired pending outbound contexts cleaned", count=expired_count)
+
+    snapshot = build_config_snapshot(settings)
+    greeting_text: str | None = None
+    greeting_error: str | None = None
+
+    try:
+        async with asyncio.timeout(settings.outbound_greeting_prep_timeout_secs):
+            greeting_text = await generate_outbound_greeting_text(
+                snapshot=snapshot,
+                settings=settings,
+                to_number=to_number,
+            )
+    except TimeoutError:
+        greeting_error = "Greeting generation timed out"
+        logger.warning("Outbound greeting generation timed out")
+    except Exception as exc:
+        greeting_error = str(exc)
+        logger.warning("Outbound greeting generation failed: {err}", err=str(exc))
+
+    pending_context = create_pending_outbound_context(
+        to_number=to_number,
+        config_snapshot=snapshot,
+        greeting_text=greeting_text,
+        greeting_error=greeting_error,
+    )
+
     try:
         async with asyncio.timeout(10.0):
             result = await client.make_call(to_number)
+
+        if result.success and result.call_sid:
+            attach_pending_call_sid(pending_context, call_sid=result.call_sid)
             
         return templates.TemplateResponse(
             request=request,

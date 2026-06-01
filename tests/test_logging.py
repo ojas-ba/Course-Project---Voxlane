@@ -2,7 +2,11 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.utils.metrics_logger import build_turn_metrics, normalize_latency_breakdown
+from app.utils.metrics_logger import (
+    build_turn_metrics,
+    finalize_call_log,
+    normalize_latency_breakdown,
+)
 
 def test_normalize_latency_breakdown():
     # Simulate a LatencyBreakdown object without importing Pipecat directly
@@ -169,3 +173,53 @@ def test_build_turn_metrics_optional_fields_none():
     assert len(summary.unmapped_ttfb_entries) == 0
     # 2.0 - (0.5 + 0.2 + 0.3 + 0.4) = 0.6
     assert summary.residual_secs == pytest.approx(0.6)
+
+
+def test_finalize_call_log_includes_transcript():
+    call_log = finalize_call_log(
+        call_sid="call_123",
+        stream_sid="stream_456",
+        config_snapshot={"LLM_MODEL": "test-model"},
+        metrics={
+            "first_bot_speech_latency_secs": 0.9,
+            "turn_count": 1,
+            "turns": [],
+        },
+        transcript=[
+            {
+                "event_index": 1,
+                "role": "user",
+                "phase": "task",
+                "text": "Hello",
+            },
+            {
+                "event_index": 2,
+                "role": "assistant",
+                "phase": "task",
+                "text": "Hi there",
+            }
+        ],
+        completed=True,
+        error=None,
+    )
+
+    assert call_log.metrics.turn_count == 1
+    assert len(call_log.transcript) == 2
+    assert call_log.transcript[0].event_index == 1
+    assert call_log.transcript[0].text == "Hello"
+
+
+def test_finalize_call_log_skips_incomplete_turns():
+    call_log = finalize_call_log(
+        call_sid="call_123",
+        stream_sid="stream_456",
+        config_snapshot={"LLM_MODEL": "test-model"},
+        metrics={},
+        transcript=[],
+        completed=False,
+        error="User disconnected",
+    )
+
+    assert call_log.transcript == []
+    assert call_log.completed is False
+    assert call_log.error == "User disconnected"

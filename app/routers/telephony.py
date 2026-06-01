@@ -10,7 +10,14 @@ from pipecat.runner.utils import parse_telephony_websocket
 
 from app.config import get_settings
 from app.database import persist_call_log
-from app.runtime import create_session, delete_session, get_session
+from app.runtime import (
+    create_session,
+    delete_session,
+    cleanup_expired_pending_outbound_contexts,
+    get_pending_outbound_context,
+    get_session,
+    pop_pending_outbound_context,
+)
 from app.services.pipecat_pipeline import run_pipeline
 from app.services.transport_factory import build_exotel_transport
 from app.utils.metrics_logger import finalize_call_log
@@ -116,12 +123,20 @@ async def exotel_websocket(websocket: WebSocket) -> None:
             return
 
         settings = get_settings()
+        cleanup_expired_pending_outbound_contexts(settings.pending_outbound_ttl_secs)
+        pending_context = get_pending_outbound_context(call_sid)
+        config_snapshot = (
+            pending_context["config_snapshot"]
+            if pending_context is not None
+            else None
+        )
 
         try:
             session = create_session(
                 call_sid=call_sid,
                 stream_sid=stream_sid,
                 settings=settings,
+                config_snapshot=config_snapshot,
             )
         except ValueError:
             await websocket.close(
@@ -131,6 +146,9 @@ async def exotel_websocket(websocket: WebSocket) -> None:
             return
 
         created_call_sid = call_sid
+        if pending_context is not None:
+            pop_pending_outbound_context(call_sid)
+
         log = logger.bind(call_sid=call_sid, stream_sid=stream_sid)
         log.info("Session created, building transport")
 
@@ -149,6 +167,13 @@ async def exotel_websocket(websocket: WebSocket) -> None:
             stream_sid=stream_sid,
             snapshot=session["config_snapshot"],
             settings=settings,
+            prepared_greeting_text=(
+                pending_context["greeting_text"]
+                if pending_context is not None
+                else None
+            ),
+            opening_mode="outbound" if pending_context is not None else "default",
+            greeting_start_delay_ms=settings.outbound_greeting_start_delay_ms,
         )
 
         if result.error:
@@ -164,6 +189,7 @@ async def exotel_websocket(websocket: WebSocket) -> None:
                 stream_sid=stream_sid,
                 config_snapshot=session["config_snapshot"],
                 metrics=session["metrics"],
+                transcript=session["transcript"],
                 completed=result.completed,
                 error=result.error,
             )
@@ -191,6 +217,7 @@ async def exotel_websocket(websocket: WebSocket) -> None:
                     stream_sid=session["stream_sid"],
                     config_snapshot=session["config_snapshot"],
                     metrics=session["metrics"],
+                    transcript=session["transcript"],
                     completed=False,
                     error="WebSocket disconnected before pipeline execution",
                 )
@@ -212,6 +239,7 @@ async def exotel_websocket(websocket: WebSocket) -> None:
                     stream_sid=session["stream_sid"],
                     config_snapshot=session["config_snapshot"],
                     metrics=session["metrics"],
+                    transcript=session["transcript"],
                     completed=False,
                     error="Unexpected error during call handling",
                 )

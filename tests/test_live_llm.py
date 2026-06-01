@@ -21,7 +21,7 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.aggregators.llm_context import LLMContext
 
 from app.config import get_settings
-from app.services.pipecat_pipeline import _build_llm
+from app.services.conversation_controller import _build_cerebras_llm
 
 class MockSourceNode(FrameProcessor):
     """Pushes test frames immediately after pipeline startup."""
@@ -82,7 +82,7 @@ async def test_live_llm_metrics():
         "LLM_TEMPERATURE": settings.llm_temperature,
     }
     
-    llm = _build_llm(snapshot, settings)
+    llm = _build_cerebras_llm(snapshot, settings)
     
     # We must use LLMContextFrame to trigger the Cerebras LLM generation flow in isolation.
     context = LLMContext(messages=[

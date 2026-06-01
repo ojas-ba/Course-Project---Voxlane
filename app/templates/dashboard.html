@@ -923,6 +923,85 @@
             color: var(--text-secondary);
             word-break: break-all;
         }
+
+        .transcript-section {
+            margin-bottom: 1.75rem;
+        }
+
+        .transcript-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            margin-bottom: 1.75rem;
+        }
+
+        .transcript-turn-card {
+            border: 1px solid var(--border-muted);
+            border-radius: 10px;
+            background-color: rgba(255, 255, 255, 0.02);
+            overflow: hidden;
+        }
+
+        .transcript-turn-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border-muted);
+            background-color: rgba(255, 255, 255, 0.03);
+        }
+
+        .transcript-turn-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .transcript-turn-body {
+            display: flex;
+            flex-direction: column;
+            gap: 0.9rem;
+            padding: 1rem;
+        }
+
+        .transcript-message {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+
+        .transcript-speaker {
+            font-size: 0.78rem;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+        }
+
+        .transcript-speaker.user {
+            color: var(--accent-blue);
+        }
+
+        .transcript-speaker.assistant {
+            color: var(--accent-green);
+        }
+
+        .transcript-bubble {
+            border: 1px solid var(--border-muted);
+            border-radius: 8px;
+            padding: 0.85rem 1rem;
+            color: var(--text-secondary);
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .transcript-bubble.user {
+            background-color: rgba(59, 130, 246, 0.08);
+        }
+
+        .transcript-bubble.assistant {
+            background-color: rgba(16, 185, 129, 0.08);
+        }
     </style>
 </head>
 
@@ -1188,6 +1267,48 @@
     </tr>
 </table>
 {% endif %}
+
+<div class="transcript-section">
+    <h4 class="breakdown-header">Conversation Transcript</h4>
+    {% if log.transcript %}
+    <div class="transcript-list">
+        {% for transcript_event in log.transcript %}
+        <div class="transcript-turn-card">
+            <div class="transcript-turn-header">
+                <span class="transcript-turn-title">
+                    {% if transcript_event.event_index is defined %}
+                    Event {{ transcript_event.event_index }} · {{ transcript_event.phase | title }}
+                    {% else %}
+                    Turn {{ transcript_event.turn_index }}
+                    {% endif %}
+                </span>
+            </div>
+            <div class="transcript-turn-body">
+                {% if transcript_event.role is defined %}
+                <div class="transcript-message">
+                    <span class="transcript-speaker {{ transcript_event.role }}">{{ transcript_event.role | title }}</span>
+                    <div class="transcript-bubble {{ transcript_event.role }}">{{ transcript_event.text }}</div>
+                </div>
+                {% else %}
+                    <div class="transcript-message">
+                        <span class="transcript-speaker user">User</span>
+                        <div class="transcript-bubble user">{{ transcript_event.user_text }}</div>
+                    </div>
+                    <div class="transcript-message">
+                        <span class="transcript-speaker assistant">Assistant</span>
+                        <div class="transcript-bubble assistant">{{ transcript_event.assistant_text }}</div>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-turns-message">
+        No transcript captured for this call.
+    </div>
+    {% endif %}
+</div>
 
 <!-- Chronological Latency Timeline -->
 <h4 class="breakdown-header">

@@ -4,15 +4,18 @@ from fastapi.testclient import TestClient
 import httpx
 
 from main import app
-from app.services.exotel_client import ExotelOutboundClient
+from app.runtime import PENDING_OUTBOUND_CALLS
+from app.services.exotel_client import ExotelCallResult, ExotelOutboundClient
 from app.config import Settings
 
 @pytest.fixture
 def client():
     with patch("main.init_database", new_callable=AsyncMock), \
          patch("main.close_database", new_callable=AsyncMock):
+        PENDING_OUTBOUND_CALLS.clear()
         with TestClient(app) as test_client:
             yield test_client
+        PENDING_OUTBOUND_CALLS.clear()
 
 def test_exotel_webhook_json_response(client):
     # The app is not explicitly configured with settings inside the TestClient
@@ -25,6 +28,32 @@ def test_exotel_webhook_json_response(client):
         response = client.get("/telephony/webhook?CallSid=123")
         assert response.status_code == 200
         assert response.json() == {"url": "wss://test.ngrok.app/telephony/exotel?sample-rate=16000"}
+
+
+def test_dashboard_outbound_creates_pending_context(client):
+    mock_exotel_client = AsyncMock()
+    mock_exotel_client.make_call.return_value = ExotelCallResult(
+        success=True,
+        call_sid="call_123",
+    )
+    client.app.state.exotel_client = mock_exotel_client
+
+    with patch(
+        "app.routers.dashboard.generate_outbound_greeting_text",
+        new_callable=AsyncMock,
+    ) as mock_greeting:
+        mock_greeting.return_value = "Hi, is now a good time to continue?"
+        response = client.post(
+            "/telephony/outbound",
+            data={"to_number": "+919876543210"},
+        )
+
+    assert response.status_code == 200
+    assert "call_123" in response.text
+    assert PENDING_OUTBOUND_CALLS["call_123"]["greeting_text"] == (
+        "Hi, is now a good time to continue?"
+    )
+    assert PENDING_OUTBOUND_CALLS["call_123"]["config_snapshot"]["SAMPLE_RATE"] == 16000
 
 @pytest.mark.asyncio
 async def test_exotel_outbound_client_success():

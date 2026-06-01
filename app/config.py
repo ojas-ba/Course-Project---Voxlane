@@ -29,6 +29,26 @@ class Settings(BaseSettings):
     tts_voice_id: str = Field(alias="TTS_VOICE_ID")
     tts_model: str = Field(alias="TTS_MODEL")
     initial_greeting_prompt: str = Field(alias="INITIAL_GREETING_PROMPT")
+    initial_greeting_instructions: str = Field(
+        default="",
+        alias="INITIAL_GREETING_INSTRUCTIONS",
+    )
+    initial_greeting_fallback_text: str = Field(
+        default="",
+        alias="INITIAL_GREETING_FALLBACK_TEXT",
+    )
+    outbound_greeting_prep_timeout_secs: float = Field(
+        default=2.0,
+        alias="OUTBOUND_GREETING_PREP_TIMEOUT_SECS",
+    )
+    outbound_greeting_start_delay_ms: int = Field(
+        default=100,
+        alias="OUTBOUND_GREETING_START_DELAY_MS",
+    )
+    pending_outbound_ttl_secs: float = Field(
+        default=600.0,
+        alias="PENDING_OUTBOUND_TTL_SECS",
+    )
     mongo_uri: str = Field(alias="MONGO_URI")
     mongo_db_name: str = Field(alias="MONGO_DB_NAME")
 

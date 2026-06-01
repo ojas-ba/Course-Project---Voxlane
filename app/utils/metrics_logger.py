@@ -205,6 +205,7 @@ def finalize_call_log(
     stream_sid: str,
     config_snapshot: dict[str, Any],
     metrics: dict[str, Any],
+    transcript: list[dict[str, Any]],
     completed: bool,
     error: str | None,
 ) -> CallLog:
@@ -218,6 +219,7 @@ def finalize_call_log(
         stream_sid: Exotel stream identifier.
         config_snapshot: The immutable per-call config snapshot.
         metrics: The accumulated metrics dict from the runtime session.
+        transcript: The completed transcript turns from the runtime session.
         completed: Whether the pipeline completed normally.
         error: Error description if the pipeline failed.
 
@@ -239,6 +241,7 @@ def finalize_call_log(
         stream_sid=stream_sid,
         config_snapshot=config_snapshot,
         metrics=call_metrics,
+        transcript=transcript,
         completed=completed,
         error=error,
     )

@@ -47,3 +47,88 @@ def test_dashboard_sessions_active(client):
     assert response.status_code == 200
     assert "SID: test_call_si..." in response.text
     assert "Model: test-model" in response.text
+
+
+class _FakeCollection:
+    def __init__(self, document):
+        self._document = document
+
+    async def find_one(self, query):
+        return self._document
+
+
+class _FakeDatabase:
+    def __init__(self, document):
+        self._document = document
+
+    def __getitem__(self, name):
+        assert name == "call_logs"
+        return _FakeCollection(self._document)
+
+
+def test_dashboard_log_detail_renders_transcript(client):
+    log_document = {
+        "call_sid": "call_123",
+        "completed": True,
+        "error": None,
+        "config_snapshot": {
+            "LLM_MODEL": "test-model",
+            "TTS_VOICE_ID": "test-voice",
+            "TTS_MODEL": "test-tts",
+            "INITIAL_GREETING_PROMPT": "Hi there",
+        },
+        "metrics": {
+            "first_bot_speech_latency_secs": 0.8,
+            "turn_count": 1,
+            "turns": [],
+        },
+        "transcript": [
+            {
+                "event_index": 1,
+                "role": "assistant",
+                "phase": "greeting",
+                "text": "Hi, is now a good time?",
+            },
+            {
+                "event_index": 2,
+                "role": "user",
+                "phase": "readiness",
+                "text": "Yes, go ahead",
+            }
+        ],
+    }
+
+    with patch("app.routers.dashboard.get_database", return_value=_FakeDatabase(log_document)):
+        response = client.get("/dashboard/logs/call_123")
+
+    assert response.status_code == 200
+    assert "Conversation Transcript" in response.text
+    assert "Event 1" in response.text
+    assert "Greeting" in response.text
+    assert "Hi, is now a good time?" in response.text
+    assert "Yes, go ahead" in response.text
+
+
+def test_dashboard_log_detail_shows_empty_transcript_state(client):
+    log_document = {
+        "call_sid": "call_123",
+        "completed": True,
+        "error": None,
+        "config_snapshot": {
+            "LLM_MODEL": "test-model",
+            "TTS_VOICE_ID": "test-voice",
+            "TTS_MODEL": "test-tts",
+            "INITIAL_GREETING_PROMPT": "Hi there",
+        },
+        "metrics": {
+            "first_bot_speech_latency_secs": None,
+            "turn_count": 0,
+            "turns": [],
+        },
+    }
+
+    with patch("app.routers.dashboard.get_database", return_value=_FakeDatabase(log_document)):
+        response = client.get("/dashboard/logs/call_123")
+
+    assert response.status_code == 200
+    assert "No transcript captured for this call." in response.text

@@ -4,10 +4,12 @@ These Pydantic models define the persistence-safe shapes written to MongoDB.
 They are output schemas only — internal runtime containers remain as
 plain dicts in app/runtime.py.
 
-Phase 3 scope: metrics and latency only. No transcript models.
+Transcript data is stored as chronological role-based events.
 """
 
 from __future__ import annotations
+
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -58,6 +60,18 @@ class TurnMetrics(BaseModel):
     latency_summary: LatencySummary | None = None
 
 
+class TranscriptEvent(BaseModel):
+    """Single chronological transcript event.
+
+    Supports assistant-only greetings and user-only readiness utterances.
+    """
+
+    event_index: int
+    role: Literal["assistant", "user"]
+    phase: Literal["greeting", "readiness", "task", "closing", "unknown"]
+    text: str
+
+
 class CallMetrics(BaseModel):
     """Aggregated metrics for an entire call.
 
@@ -74,12 +88,14 @@ class CallLog(BaseModel):
     """Top-level persistence document for a completed call.
 
     This is the shape written to the call_logs MongoDB collection.
-    Phase 3 does not include transcript data.
+    Transcript uses role-based events so greetings can be stored without
+    requiring a paired user turn.
     """
 
     call_sid: str
     stream_sid: str
     config_snapshot: dict  # ConfigSnapshot as plain dict for MongoDB
     metrics: CallMetrics = Field(default_factory=CallMetrics)
+    transcript: list[TranscriptEvent] = Field(default_factory=list)
     completed: bool = True
     error: str | None = None

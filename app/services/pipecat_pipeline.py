@@ -16,11 +16,15 @@ Service construction patterns verified against Pipecat 1.2.1:
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import LLMMessagesAppendFrame
+from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
+    TTSSpeakFrame,
+    TranscriptionFrame,
+)
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -30,8 +34,8 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.cartesia.tts import CartesiaTTSService, CartesiaTTSSettings
-from pipecat.services.cerebras.llm import CerebrasLLMService, CerebrasLLMSettings
 from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 from pipecat.services.tts_service import TextAggregationMode
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport
@@ -42,7 +46,17 @@ from pipecat.turns.user_mute import (
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
 from app.config import Settings, V1_SAMPLE_RATE
-from app.runtime import ConfigSnapshot, append_session_turn_metrics, update_session_first_latency
+from app.runtime import (
+    ConfigSnapshot,
+    append_session_transcript_event,
+    append_session_turn_metrics,
+    update_session_first_latency,
+)
+from app.services.conversation_controller import (
+    ConversationRuntimeState,
+    apply_turn_decision,
+    decide_next_turn,
+)
 from app.utils.metrics_logger import build_turn_metrics
 
 
@@ -58,22 +72,8 @@ def _build_stt(settings: Settings) -> DeepgramFluxSTTService:
         should_interrupt=False,
         settings=DeepgramFluxSTTService.Settings(
             model="flux-general-en",
-        ),
-    )
-
-
-def _build_llm(snapshot: ConfigSnapshot, settings: Settings) -> CerebrasLLMService:
-    """Construct the Cerebras LLM service using typed Settings.
-
-    Verified Pipecat 1.2.1 pattern:
-    - model and temperature via settings=CerebrasLLMSettings(...)
-    """
-
-    return CerebrasLLMService(
-        api_key=settings.cerebras_api_key,
-        settings=CerebrasLLMSettings(
-            model=snapshot["LLM_MODEL"],
-            temperature=snapshot["LLM_TEMPERATURE"],
+            eot_threshold=0.65,
+            eot_timeout_ms=1000,
         ),
     )
 
@@ -108,7 +108,7 @@ def _build_tts(snapshot: ConfigSnapshot, settings: Settings) -> CartesiaTTSServi
 
 
 def _build_context(snapshot: ConfigSnapshot) -> LLMContext:
-    """Build the initial LLM context with the system prompt."""
+    """Build the context object required by Pipecat aggregators."""
 
     return LLMContext(
         messages=[
@@ -132,6 +132,142 @@ def _build_aggregator_pair(context: LLMContext) -> LLMContextAggregatorPair:
     )
 
 
+def _normalize_transcript_text(text: str) -> str:
+    """Collapse transcript whitespace into a clean single string."""
+
+    return " ".join(text.split())
+
+
+class UserConversationProcessor(FrameProcessor):
+    """Route finalized user utterances through the structured controller."""
+
+    def __init__(
+        self,
+        *,
+        call_sid: str,
+        state: ConversationRuntimeState,
+        snapshot: ConfigSnapshot,
+        settings: Settings,
+        opening_mode: Literal["outbound", "default"] = "default",
+    ) -> None:
+        super().__init__()
+        self._call_sid = call_sid
+        self._state = state
+        self._snapshot = snapshot
+        self._settings = settings
+        self._opening_mode = opening_mode
+
+    async def process_frame(
+        self,
+        frame: Any,
+        direction: FrameDirection = FrameDirection.DOWNSTREAM,
+    ) -> None:
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, BotStoppedSpeakingFrame) and self._state.greeting_audio_pending:
+            self._state.greeting_audio_pending = False
+            self._state.phase = "awaiting_readiness" if self._opening_mode == "outbound" else "task"
+
+        if direction == FrameDirection.DOWNSTREAM and isinstance(frame, TranscriptionFrame) and frame.finalized:
+            cleaned_text = _normalize_transcript_text(frame.text)
+            if cleaned_text:
+                if self._state.greeting_audio_pending:
+                    return
+
+                self._state.last_user_text = cleaned_text
+                user_phase = "readiness" if self._state.phase == "awaiting_readiness" else self._state.phase
+                append_session_transcript_event(
+                    self._call_sid,
+                    role="user",
+                    phase=user_phase if user_phase in {"readiness", "task", "closing"} else "task",
+                    text=cleaned_text,
+                )
+                self._state.recent_events.append(
+                    {"role": "user", "phase": user_phase, "text": cleaned_text}
+                )
+                decision = await decide_next_turn(
+                    user_text=cleaned_text,
+                    state=self._state,
+                    snapshot=self._snapshot,
+                    settings=self._settings,
+                )
+                apply_turn_decision(self._state, decision)
+                assistant_phase = "closing" if self._state.phase == "closing" else decision.phase
+                self._state.recent_events.append(
+                    {
+                        "role": "assistant",
+                        "phase": assistant_phase,
+                        "text": decision.assistant_text,
+                    }
+                )
+                append_session_transcript_event(
+                    self._call_sid,
+                    role="assistant",
+                    phase=assistant_phase,
+                    text=decision.assistant_text,
+                )
+                await self.push_frame(
+                    TTSSpeakFrame(decision.assistant_text, append_to_context=True),
+                    FrameDirection.DOWNSTREAM,
+                )
+                return
+
+        await self.push_frame(frame, direction)
+
+
+def _record_greeting(
+    *,
+    call_sid: str,
+    state: ConversationRuntimeState,
+    greeting_text: str,
+) -> None:
+    state.recent_events.append(
+        {"role": "assistant", "phase": "greeting", "text": greeting_text}
+    )
+    append_session_transcript_event(
+        call_sid,
+        role="assistant",
+        phase="greeting",
+        text=greeting_text,
+    )
+
+
+def _build_pipeline_processors(
+    *,
+    transport: FastAPIWebsocketTransport,
+    snapshot: ConfigSnapshot,
+    settings: Settings,
+    call_sid: str,
+    opening_mode: Literal["outbound", "default"] = "default",
+    conversation_state: ConversationRuntimeState | None = None,
+) -> list[Any]:
+    """Construct the full pipeline processor list for one call."""
+
+    stt = _build_stt(settings)
+    tts = _build_tts(snapshot, settings)
+    context = _build_context(snapshot)
+    aggregator_pair = _build_aggregator_pair(context)
+    conversation_state = conversation_state or ConversationRuntimeState(
+        phase="greeting" if opening_mode == "outbound" else "task"
+    )
+
+    return [
+        transport.input(),
+        stt,
+        UserConversationProcessor(
+            call_sid=call_sid,
+            state=conversation_state,
+            snapshot=snapshot,
+            settings=settings,
+            opening_mode=opening_mode,
+        ),
+        aggregator_pair.user(),
+        tts,
+        aggregator_pair.assistant(),
+        transport.output(),
+    ]
+
+
 class PipelineExecutionResult:
     """Serializable result returned after pipeline execution completes.
 
@@ -151,6 +287,9 @@ async def run_pipeline(
     stream_sid: str,
     snapshot: ConfigSnapshot,
     settings: Settings,
+    prepared_greeting_text: str | None = None,
+    opening_mode: Literal["outbound", "default"] = "default",
+    greeting_start_delay_ms: int = 100,
 ) -> PipelineExecutionResult:
     """Assemble and run the Pipecat pipeline for one call.
 
@@ -181,25 +320,20 @@ async def run_pipeline(
 
     log = logger.bind(call_sid=call_sid)
 
-    # --- Service construction (verified Pipecat 1.2.1 .Settings() pattern) ---
-    stt = _build_stt(settings)
-    llm = _build_llm(snapshot, settings)
-    tts = _build_tts(snapshot, settings)
-
-    context = _build_context(snapshot)
-    aggregator_pair = _build_aggregator_pair(context)
-
     # --- Pipeline assembly ---
+    conversation_state = ConversationRuntimeState(
+        phase="greeting" if opening_mode == "outbound" else "task"
+    )
+
     pipeline = Pipeline(
-        [
-            transport.input(),
-            stt,
-            aggregator_pair.user(),
-            llm,
-            tts,
-            aggregator_pair.assistant(),
-            transport.output(),
-        ]
+        _build_pipeline_processors(
+            transport=transport,
+            snapshot=snapshot,
+            settings=settings,
+            call_sid=call_sid,
+            opening_mode=opening_mode,
+            conversation_state=conversation_state,
+        )
     )
 
     # --- Observer registration (on PipelineTask, not PipelineParams) ---
@@ -265,13 +399,29 @@ async def run_pipeline(
     # queue_frame() uses asyncio.Queue internally (initialized in PipelineTask.__init__),
     # so frames queued here are safely buffered and delivered once runner.run() starts
     # draining the queue. This achieves bot-initiated opening without polling.
-    greeting_frame = LLMMessagesAppendFrame(
-        messages=[
-            {"role": "user", "content": snapshot["INITIAL_GREETING_PROMPT"]},
-        ],
-        run_llm=True,
-    )
-    await task.queue_frame(greeting_frame)
+    if greeting_start_delay_ms > 0:
+        await asyncio.sleep(greeting_start_delay_ms / 1000)
+
+    if opening_mode == "outbound":
+        cleaned_greeting = _normalize_transcript_text(
+            prepared_greeting_text or snapshot["INITIAL_GREETING_FALLBACK_TEXT"]
+        )
+        _record_greeting(
+            call_sid=call_sid,
+            state=conversation_state,
+            greeting_text=cleaned_greeting,
+        )
+        conversation_state.phase = "greeting"
+        conversation_state.greeting_audio_pending = True
+        await task.queue_frame(TTSSpeakFrame(cleaned_greeting, append_to_context=True))
+    else:
+        cleaned_greeting = _normalize_transcript_text(snapshot["INITIAL_GREETING_FALLBACK_TEXT"])
+        _record_greeting(
+            call_sid=call_sid,
+            state=conversation_state,
+            greeting_text=cleaned_greeting,
+        )
+        await task.queue_frame(TTSSpeakFrame(cleaned_greeting, append_to_context=True))
 
     # --- Runner execution ---
     runner = PipelineRunner(handle_sigint=False)

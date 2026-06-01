@@ -7,6 +7,7 @@ This repository contains a local-development voice agent prototype using FastAPI
 - Current architecture and behavior contracts: `docs/current/`
 - Rebuild roadmap and phase plans: `docs/plans/`
 - Accepted architecture decisions (ADRs): `docs/decisions/`
+- Design rulebooks for implementation contracts: `docs/design/`
 - Historical specs/phase docs/notes: `docs/archive/`
 
 ## Start Here
@@ -20,18 +21,24 @@ This repository contains a local-development voice agent prototype using FastAPI
 
 - `docs/specs/VOICE_AGENT_V2_SPEC.md` - source-of-truth engineering specification for the V2 rebuild.
 
+## Design Rulebooks
+
+- `docs/design/TURN_AND_CONVERSATION_RULES.md` - operational rules for turn-taking, conversation state, LLM boundaries, speech composition, and latency tradeoffs.
+
 ## Source-Of-Truth Priority
 
-1. `docs/specs/VOICE_AGENT_V2_SPEC.md`
+1. `docs/specs/`
 2. `docs/decisions/`
-3. `docs/current/`
-4. `docs/plans/`
-5. `docs/archive/`
+3. `docs/design/`
+4. `docs/current/`
+5. `docs/plans/`
+6. `docs/archive/`
 
 Meaning:
 
 - spec defines what to build
 - ADRs define fixed decisions
+- design docs define operational implementation rules
 - current docs explain architecture/runtime
 - plans explain implementation order
 - archive is historical reference only

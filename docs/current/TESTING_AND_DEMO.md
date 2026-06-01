@@ -5,6 +5,13 @@
 - Current goal is single-call feasibility demo.
 - Automated tests do not fully validate live voice behavior.
 
+## Test Execution Policy
+
+- Normal local test runs exclude live provider calls by default (`pytest`).
+- Live tests are preserved and can be run explicitly with `pytest -m live` or `RUN_LIVE_TESTS=1 pytest`.
+- Live tests require valid API keys and active provider billing/credits.
+- Live tests may fail due to provider-side issues (for example `402`, `429`, quota, or outage) even when app logic is correct.
+
 ## Demo Success Criteria
 
 - Greeting works.

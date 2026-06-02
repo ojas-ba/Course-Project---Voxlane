@@ -7,18 +7,24 @@
 3. Exotel connects to WebSocket.
 4. Pipecat pipeline handles transport/STT/TTS.
 5. TurnCollector emits committed user turns.
-6. Phase 2 temporarily bridges committed turns through the legacy conversation controller.
-7. FlowRunner decides next use-case action.
-8. LLMAdapter performs bounded classification/extraction/phrasing.
+6. ConversationRuntime validates call identity, owns per-call state, and orchestrates deterministic turn handling.
+7. SimpleFlowRunner decides the next configured slot/action.
+8. RepeatedQuestionGuard normalizes repeated or invalid asking actions.
 9. SpeechComposer creates final assistant text.
 10. Cartesia speaks response.
 11. Final call log is persisted after call completion.
 
-Later V2 phases replace the temporary legacy bridge with `ConversationRuntime`,
-`FlowRunner`, `LLMAdapter`, and `SpeechComposer`.
+Phase 3E removed the active committed-turn bridge to the old turn-decision
+controller. The active path does not call `decide_next_turn()` for committed
+turns. Outbound greeting generation may still use the LLM-backed greeting
+helper before the call connects.
 
 ## Persistence And State Notes
 
 - No MongoDB writes inside the hot live audio path unless necessary.
 - Active call state should stay in memory.
+- Active call sessions store a JSON-safe `conversation_state` snapshot for
+  dashboard/debug visibility.
 - Final call logs should persist after call completion.
+- Final call logs include the latest `conversation_state` snapshot so collected
+  slot state survives `ACTIVE_SESSIONS` cleanup.

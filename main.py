@@ -23,7 +23,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Initialize database client
     settings = get_settings()
-    await init_database(settings)
+    try:
+        await init_database(settings)
+    except Exception as exc:
+        logger.warning(
+            "MongoDB unavailable at startup; continuing without persistence: {err}",
+            err=str(exc),
+        )
 
     # Initialize Exotel outbound client (optional — server starts without it)
     try:

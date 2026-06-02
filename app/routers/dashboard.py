@@ -178,18 +178,23 @@ async def post_outbound(request: Request) -> Response:
         async with asyncio.timeout(10.0):
             result = await client.make_call(to_number)
 
-        if result.success and result.call_sid:
+        outbound_success = result.success and bool(result.call_sid)
+        outbound_error = result.error
+        if result.success and not result.call_sid:
+            outbound_error = "Exotel did not return a CallSid."
+
+        if outbound_success and result.call_sid:
             attach_pending_call_sid(pending_context, call_sid=result.call_sid)
-            
+
         return templates.TemplateResponse(
             request=request,
             name="dashboard.html",
             context={
                 "part": "outbound_status",
-                "success": result.success,
+                "success": outbound_success,
                 "to_number": to_number,
                 "call_sid": result.call_sid,
-                "error": result.error,
+                "error": outbound_error,
             },
         )
     except TimeoutError:

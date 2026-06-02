@@ -67,9 +67,11 @@ def test_call_log_valid():
         call_sid="call_123",
         stream_sid="stream_456",
         config_snapshot={"model": "test"},
+        conversation_state={"phase": "collecting", "slots": {}},
     )
     assert log.call_sid == "call_123"
     assert log.stream_sid == "stream_456"
+    assert log.conversation_state == {"phase": "collecting", "slots": {}}
     assert log.completed is True
     assert log.error is None
     assert isinstance(log.metrics, CallMetrics)

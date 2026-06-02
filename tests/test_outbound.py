@@ -125,6 +125,29 @@ def test_dashboard_outbound_unknown_profile_falls_back(client):
         "used_fallback": True,
     }
 
+
+def test_dashboard_outbound_rejects_success_without_call_sid(client):
+    mock_exotel_client = AsyncMock()
+    mock_exotel_client.make_call.return_value = ExotelCallResult(
+        success=True,
+        call_sid=None,
+    )
+    client.app.state.exotel_client = mock_exotel_client
+
+    with patch(
+        "app.routers.dashboard.generate_outbound_greeting_text",
+        new_callable=AsyncMock,
+    ) as mock_greeting:
+        mock_greeting.return_value = "Hi, is now a good time to continue?"
+        response = client.post(
+            "/telephony/outbound",
+            data={"to_number": "+919876543210"},
+        )
+
+    assert response.status_code == 200
+    assert "Exotel did not return a CallSid." in response.text
+    assert PENDING_OUTBOUND_CALLS == {}
+
 @pytest.mark.asyncio
 async def test_exotel_outbound_client_success():
     settings = Settings(
@@ -163,6 +186,36 @@ async def test_exotel_outbound_client_success():
         assert form_data["From"] == "09876543210"
         assert form_data["CallerId"] == "1234567890"
         assert form_data["Url"] == "https://my.in.exotel.com/test_acc/exoml/start_voice/flow_123"
+
+
+@pytest.mark.asyncio
+async def test_exotel_outbound_client_missing_call_sid_is_failure():
+    settings = Settings(
+        EXOTEL_ACCOUNT_SID="test_acc",
+        EXOTEL_API_KEY="test_key",
+        EXOTEL_API_TOKEN="test_token",
+        EXOTEL_VIRTUAL_NUMBER="1234567890",
+        EXOTEL_FLOW_ID="flow_123",
+        EXOTEL_SUBDOMAIN="api.in.exotel.com",
+        PUBLIC_NGROK_URL="test.ngrok.app",
+    )
+    exotel_client = ExotelOutboundClient(settings)
+
+    mock_request = httpx.Request("POST", "https://api.in.exotel.com")
+    mock_response = httpx.Response(
+        200,
+        request=mock_request,
+        text="<TwilioResponse><Call></Call></TwilioResponse>",
+    )
+
+    with patch.object(exotel_client._client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+
+        result = await exotel_client.make_call("+919876543210")
+
+        assert result.success is False
+        assert result.call_sid is None
+        assert result.error == "Exotel response did not include a CallSid"
 
 @pytest.mark.asyncio
 async def test_exotel_outbound_client_error():

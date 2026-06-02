@@ -1,14 +1,9 @@
-"""LLM-led conversation controller for outbound voice calls."""
+"""LLM-led outbound greeting generation for voice calls."""
 
 from __future__ import annotations
 
-import json
 import re
-from dataclasses import dataclass, field
-from typing import Any, Literal
 
-from loguru import logger
-from pydantic import BaseModel, Field, ValidationError
 from pipecat.frames.frames import (
     EndFrame,
     Frame,
@@ -27,32 +22,7 @@ from pipecat.services.cerebras.llm import CerebrasLLMService, CerebrasLLMSetting
 from app.config import Settings
 from app.runtime import ConfigSnapshot
 
-ConversationPhase = Literal["greeting", "awaiting_readiness", "task", "closing"]
-TurnPhase = Literal["readiness", "task", "closing"]
-UserIntent = Literal["ready", "not_now", "question", "answer", "unclear"]
-
-SAFE_CLARIFICATION_TEXT = "Sorry, I want to make sure I got that right. Could you repeat that briefly?"
-SAFE_GREETING_FALLBACK = "Hello. I am calling for a short conversation. Is now a good time?"
 MAX_ASSISTANT_TEXT_CHARS = 320
-
-
-class TurnDecision(BaseModel):
-    """Validated internal decision for one assistant turn."""
-
-    phase: TurnPhase
-    assistant_text: str = Field(min_length=1, max_length=MAX_ASSISTANT_TEXT_CHARS)
-    user_intent: UserIntent
-    should_end_call: bool = False
-
-
-@dataclass
-class ConversationRuntimeState:
-    """Serializable-lite conversation state held for one live pipeline."""
-
-    phase: ConversationPhase
-    greeting_audio_pending: bool = False
-    last_user_text: str | None = None
-    recent_events: list[dict[str, str]] = field(default_factory=list)
 
 
 class _ContextSource(FrameProcessor):
@@ -130,17 +100,6 @@ async def _run_llm_text_generation(
     return collector.text
 
 
-def _extract_json_object(text: str) -> dict[str, Any] | None:
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        parsed = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
 def _has_simulated_speaker(text: str) -> bool:
     return re.search(
         r"\b(user|candidate|caller|interviewer|assistant|bot)\s*:",
@@ -162,27 +121,6 @@ def _is_valid_assistant_text(text: str) -> bool:
     if _question_count(cleaned) > 1:
         return False
     return True
-
-
-def validate_turn_decision(raw: dict[str, Any]) -> TurnDecision:
-    """Validate and safety-check a model-generated TurnDecision."""
-
-    decision = TurnDecision.model_validate(raw)
-    decision.assistant_text = _normalize_text(decision.assistant_text)
-    if not _is_valid_assistant_text(decision.assistant_text):
-        raise ValueError("assistant_text failed voice safety validation")
-    return decision
-
-
-def safe_turn_decision(*, phase: TurnPhase = "task") -> TurnDecision:
-    """Return a safe clarification decision for malformed model output."""
-
-    return TurnDecision(
-        phase=phase,
-        assistant_text=SAFE_CLARIFICATION_TEXT,
-        user_intent="unclear",
-        should_end_call=False,
-    )
 
 
 def validate_greeting_text(text: str) -> str:
@@ -239,63 +177,3 @@ async def generate_outbound_greeting_text(
         ],
     )
     return validate_greeting_text(raw)
-
-
-async def decide_next_turn(
-    *,
-    user_text: str,
-    state: ConversationRuntimeState,
-    snapshot: ConfigSnapshot,
-    settings: Settings,
-) -> TurnDecision:
-    """Ask the LLM for a structured decision for one user turn."""
-
-    history = "\n".join(
-        f"{event['role']}[{event['phase']}]: {event['text']}"
-        for event in state.recent_events[-8:]
-    )
-    system_prompt = (
-        "You are the internal controller for a generalized outbound voice agent. "
-        "Understand the user's latest message and decide the next assistant move. "
-        "Return strict JSON only with keys: phase, assistant_text, user_intent, should_end_call. "
-        "phase must be readiness, task, or closing. "
-        "user_intent must be ready, not_now, question, answer, or unclear. "
-        "assistant_text must be natural speech for the assistant only. "
-        "Never include user/candidate/caller lines. Never simulate the user. "
-        "Ask at most one question."
-    )
-    user_prompt = (
-        f"Scenario instructions:\n{snapshot['SYSTEM_PROMPT']}\n\n"
-        f"Current phase: {state.phase}\n"
-        f"Recent transcript:\n{history or '(none)'}\n\n"
-        f"Latest user message:\n{user_text}"
-    )
-
-    try:
-        raw = await _run_llm_text_generation(
-            snapshot=snapshot,
-            settings=settings,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-        parsed = _extract_json_object(raw)
-        if parsed is None:
-            raise ValueError(f"LLM did not return JSON: {raw}")
-        return validate_turn_decision(parsed)
-    except (ValidationError, ValueError, Exception) as exc:
-        logger.warning("Turn decision failed validation; using safe fallback", error=str(exc))
-        fallback_phase: TurnPhase = "readiness" if state.phase == "awaiting_readiness" else "task"
-        return safe_turn_decision(phase=fallback_phase)
-
-
-def apply_turn_decision(state: ConversationRuntimeState, decision: TurnDecision) -> None:
-    """Update runtime conversation phase from a validated TurnDecision."""
-
-    if decision.should_end_call or decision.phase == "closing" or decision.user_intent == "not_now":
-        state.phase = "closing"
-    elif decision.phase == "readiness":
-        state.phase = "awaiting_readiness"
-    else:
-        state.phase = "task"

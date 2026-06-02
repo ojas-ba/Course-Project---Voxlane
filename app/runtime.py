@@ -1,6 +1,8 @@
 """Runtime registries and helpers for call state."""
 
 from collections.abc import MutableMapping
+from copy import deepcopy
+import json
 import time
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
@@ -40,6 +42,7 @@ class RuntimeSession(TypedDict):
     transcript: list[dict[str, Any]]
     first_latency: float | None
     config_snapshot: ConfigSnapshot
+    conversation_state: NotRequired[dict[str, Any]]
 
 
 OpeningState = Literal[
@@ -158,6 +161,16 @@ def append_session_turn_metrics(call_sid: str, turn_metrics: dict[str, Any]) -> 
     turns: list[dict[str, Any]] = session["metrics"].setdefault("turns", [])
     turns.append(turn_metrics)
     session["metrics"]["turn_count"] = len(turns)
+
+
+def update_session_conversation_state(call_sid: str, state_snapshot: dict[str, Any]) -> None:
+    """Store a JSON-safe conversation state snapshot for an active session."""
+
+    session = ACTIVE_SESSIONS.get(call_sid)
+    if session is None:
+        return
+    copied_snapshot = deepcopy(state_snapshot)
+    session["conversation_state"] = json.loads(json.dumps(copied_snapshot))
 
 
 def create_pending_outbound_context(

@@ -134,6 +134,14 @@ class ExotelOutboundClient:
 
             # Exotel v1 returns XML — extract CallSid
             call_sid = self._parse_call_sid(response.text)
+            if not call_sid:
+                error_msg = "Exotel response did not include a CallSid"
+                log.error(
+                    "Exotel call response missing CallSid",
+                    response_body=response.text[:500],
+                )
+                return ExotelCallResult(success=False, error=error_msg)
+
             log.info("Outbound call initiated successfully", call_sid=call_sid)
             return ExotelCallResult(success=True, call_sid=call_sid)
 

@@ -43,12 +43,19 @@ def test_dashboard_sessions_active(client):
         "metrics": {},
         "transcript": [],
         "first_latency": None,
+        "conversation_state": {
+            "phase": "collecting",
+            "active_slot_id": "name",
+            "slots": {},
+        },
     }
-    
+
     response = client.get("/dashboard/sessions")
     assert response.status_code == 200
     assert "SID: test_call_si..." in response.text
     assert "Model: test-model" in response.text
+    assert "Phase: collecting" in response.text
+    assert "Slot: name" in response.text
 
 
 def test_dashboard_sessions_active_with_v2_snapshot(client):
@@ -65,6 +72,7 @@ def test_dashboard_sessions_active_with_v2_snapshot(client):
         "metrics": {},
         "transcript": [],
         "first_latency": None,
+        "conversation_state": {"phase": "readiness", "slots": {}},
     }
 
     response = client.get("/dashboard/sessions")
@@ -121,6 +129,16 @@ def test_dashboard_log_detail_renders_transcript(client):
                 "text": "Yes, go ahead",
             }
         ],
+        "conversation_state": {
+            "phase": "collecting",
+            "active_slot_id": "role",
+            "slots": {
+                "name": {
+                    "status": "collected",
+                    "value": "Ana",
+                }
+            },
+        },
     }
 
     with patch("app.routers.dashboard.get_database", return_value=_FakeDatabase(log_document)):
@@ -129,6 +147,10 @@ def test_dashboard_log_detail_renders_transcript(client):
     assert response.status_code == 200
     assert "Conversation Transcript" in response.text
     assert "Event 1" in response.text
+    assert "Conversation Phase" in response.text
+    assert "collecting" in response.text
+    assert "role" in response.text
+    assert "Ana" in response.text
     assert "Greeting" in response.text
     assert "Hi, is now a good time?" in response.text
     assert "Yes, go ahead" in response.text

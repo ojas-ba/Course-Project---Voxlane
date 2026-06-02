@@ -46,18 +46,22 @@ from pipecat.turns.user_mute import (
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
 from app.config import Settings, V1_SAMPLE_RATE
-from app.models.conversation_models import TurnCollectionResult, TurnEvent, TurnInput
+from app.models.config_models import FallbackPolicy, FlowDefinition
+from app.models.conversation_models import (
+    ConversationState,
+    TurnCollectionResult,
+    TurnEvent,
+    TurnInput,
+)
 from app.runtime import (
     ConfigSnapshot,
     append_session_transcript_event,
     append_session_turn_metrics,
+    build_config_snapshot,
+    update_session_conversation_state,
     update_session_first_latency,
 )
-from app.services.conversation_controller import (
-    ConversationRuntimeState,
-    apply_turn_decision,
-    decide_next_turn,
-)
+from app.services.conversation_runtime import ConversationRuntime
 from app.services.turn_collector import TurnCollector, utc_now
 from app.utils.metrics_logger import build_turn_metrics
 
@@ -140,33 +144,84 @@ def _normalize_transcript_text(text: str) -> str:
     return " ".join(text.split())
 
 
+RUNTIME_ERROR_FALLBACK_TEXT = (
+    "Sorry, something went wrong on my side. We can stop here for now."
+)
+
+
+TranscriptPhase = Literal["greeting", "readiness", "task", "closing", "unknown"]
+
+
+def _transcript_phase(phase: str) -> TranscriptPhase:
+    """Map Phase 3 runtime phases to the persisted legacy transcript phases."""
+
+    if phase == "greeting":
+        return "greeting"
+    if phase == "readiness":
+        return "readiness"
+    if phase in {"collecting", "answering_question", "task"}:
+        return "task"
+    if phase in {"closing", "ended"}:
+        return "closing"
+    return "unknown"
+
+
+def _fallback_runtime_snapshot(snapshot: ConfigSnapshot, settings: Settings) -> ConfigSnapshot:
+    if snapshot.get("flow_definition"):
+        return snapshot
+    return build_config_snapshot(settings)
+
+
+def _build_conversation_runtime(
+    *,
+    call_sid: str,
+    stream_sid: str | None,
+    snapshot: ConfigSnapshot,
+    settings: Settings,
+    opening_mode: Literal["outbound", "default"],
+) -> ConversationRuntime:
+    """Build one ConversationRuntime from the finalized call config snapshot."""
+
+    runtime_snapshot = _fallback_runtime_snapshot(snapshot, settings)
+    flow_definition = FlowDefinition.model_validate(runtime_snapshot["flow_definition"])
+    fallback_policy = FallbackPolicy.model_validate(runtime_snapshot.get("fallback_policy") or {})
+    state = ConversationState(
+        call_sid=call_sid,
+        stream_sid=stream_sid,
+        phase="greeting" if opening_mode == "outbound" else "readiness",
+    )
+    return ConversationRuntime(
+        state=state,
+        flow_definition=flow_definition,
+        fallback_policy=fallback_policy,
+    )
+
+
 class UserConversationProcessor(FrameProcessor):
-    """Route committed user turns through the temporary legacy controller bridge."""
+    """Route committed user turns through the Phase 3 conversation runtime."""
 
     def __init__(
         self,
         *,
         call_sid: str,
         stream_sid: str | None = None,
-        state: ConversationRuntimeState,
-        snapshot: ConfigSnapshot,
-        settings: Settings,
-        opening_mode: Literal["outbound", "default"] = "default",
+        conversation_runtime: ConversationRuntime,
+        greeting_audio_pending: bool = False,
         turn_collector: TurnCollector | None = None,
     ) -> None:
         super().__init__()
         self._call_sid = call_sid
         self._stream_sid = stream_sid
-        self._state = state
-        self._snapshot = snapshot
-        self._settings = settings
-        self._opening_mode = opening_mode
+        self._conversation_runtime = conversation_runtime
+        self._greeting_audio_pending = greeting_audio_pending
+        self._closing_done = False
         self._turn_collector = turn_collector or TurnCollector(
             call_sid=call_sid,
             stream_sid=stream_sid,
         )
         self._turn_processing_lock = asyncio.Lock()
         self.last_turn_collection_result: TurnCollectionResult | None = None
+        self._sync_conversation_snapshot()
 
     async def process_frame(
         self,
@@ -175,9 +230,10 @@ class UserConversationProcessor(FrameProcessor):
     ) -> None:
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, BotStoppedSpeakingFrame) and self._state.greeting_audio_pending:
-            self._state.greeting_audio_pending = False
-            self._state.phase = "awaiting_readiness" if self._opening_mode == "outbound" else "task"
+        if isinstance(frame, BotStoppedSpeakingFrame) and self._greeting_audio_pending:
+            self._greeting_audio_pending = False
+            self._conversation_runtime.set_phase("readiness")
+            self._sync_conversation_snapshot()
 
         if direction == FrameDirection.DOWNSTREAM and isinstance(frame, TranscriptionFrame) and frame.finalized:
             result = self._observe_turn_event(
@@ -192,7 +248,7 @@ class UserConversationProcessor(FrameProcessor):
                 )
             )
             self._log_turn_collection_result(result)
-            if self._state.greeting_audio_pending:
+            if self._greeting_audio_pending:
                 return
 
         await self.push_frame(frame, direction)
@@ -233,68 +289,130 @@ class UserConversationProcessor(FrameProcessor):
         return result
 
     def _observe_turn_event(self, event: TurnEvent) -> TurnCollectionResult:
-        phase = "readiness" if self._state.phase == "awaiting_readiness" else self._state.phase
         result = self._turn_collector.observe(
             event,
-            phase=phase,
-            greeting_pending=self._state.greeting_audio_pending,
+            phase=self._current_phase(),
+            greeting_pending=self._greeting_audio_pending,
         )
         self.last_turn_collection_result = result
         return result
 
     async def _handle_committed_turn(self, turn: TurnInput) -> None:
         if self._turn_processing_lock.locked():
-            self.last_turn_collection_result = TurnCollectionResult(
-                ignored_reason="turn_processing",
-                commit_source=turn.source,
-                commit_timestamp=turn.committed_at,
-                provider_turn_index=turn.provider_metadata.get("provider_turn_index"),
-            )
-            logger.info(
-                "Committed turn suppressed while previous turn is processing",
-                call_sid=self._call_sid,
-                turn_index=turn.turn_index,
-                ignored_reason="turn_processing",
-            )
+            self._suppress_committed_turn(turn=turn, ignored_reason="turn_processing")
             return
 
         async with self._turn_processing_lock:
-            self._state.last_user_text = turn.normalized_text
-            user_phase = "readiness" if self._state.phase == "awaiting_readiness" else self._state.phase
-            append_session_transcript_event(
-                self._call_sid,
+            if self._closing_done:
+                self._suppress_committed_turn(turn=turn, ignored_reason="already_closing")
+                return
+
+            pre_turn_phase = self._conversation_runtime.snapshot_state().phase
+            try:
+                result = self._conversation_runtime.handle_turn(turn)
+            except Exception as exc:
+                await self._handle_runtime_exception(
+                    turn=turn,
+                    pre_turn_phase=pre_turn_phase,
+                    exc=exc,
+                )
+                return
+
+            self._append_transcript_event(
                 role="user",
-                phase=user_phase if user_phase in {"readiness", "task", "closing"} else "task",
-                text=turn.normalized_text,
+                phase=pre_turn_phase,
+                text=result.user_transcript_text or turn.text,
             )
-            self._state.recent_events.append(
-                {"role": "user", "phase": user_phase, "text": turn.normalized_text}
-            )
-            decision = await decide_next_turn(
-                user_text=turn.normalized_text,
-                state=self._state,
-                snapshot=self._snapshot,
-                settings=self._settings,
-            )
-            apply_turn_decision(self._state, decision)
-            assistant_phase = "closing" if self._state.phase == "closing" else decision.phase
-            self._state.recent_events.append(
-                {
-                    "role": "assistant",
-                    "phase": assistant_phase,
-                    "text": decision.assistant_text,
-                }
-            )
-            append_session_transcript_event(
-                self._call_sid,
+            self._append_transcript_event(
                 role="assistant",
-                phase=assistant_phase,
-                text=decision.assistant_text,
+                phase=result.state.phase,
+                text=result.assistant_transcript_text or result.assistant_text,
             )
+            self._sync_conversation_snapshot(result.state)
             await self.push_frame(
-                TTSSpeakFrame(decision.assistant_text, append_to_context=True),
+                TTSSpeakFrame(result.assistant_text, append_to_context=True),
                 FrameDirection.DOWNSTREAM,
             )
+            if result.should_end_call:
+                self._closing_done = True
+
+    def _current_phase(self) -> str:
+        if self._greeting_audio_pending:
+            return "greeting"
+        return self._conversation_runtime.snapshot_state().phase
+
+    def _sync_conversation_snapshot(self, state: ConversationState | None = None) -> None:
+        snapshot = state or self._conversation_runtime.snapshot_state()
+        update_session_conversation_state(
+            self._call_sid,
+            snapshot.model_dump(mode="json"),
+        )
+
+    def _append_transcript_event(
+        self,
+        *,
+        role: Literal["assistant", "user"],
+        phase: str,
+        text: str,
+    ) -> None:
+        append_session_transcript_event(
+            self._call_sid,
+            role=role,
+            phase=_transcript_phase(phase),
+            text=_normalize_transcript_text(text),
+        )
+
+    def _suppress_committed_turn(self, *, turn: TurnInput, ignored_reason: str) -> None:
+        self.last_turn_collection_result = TurnCollectionResult(
+            ignored_reason=ignored_reason,
+            commit_source=turn.source,
+            commit_timestamp=turn.committed_at,
+            provider_turn_index=turn.provider_metadata.get("provider_turn_index"),
+        )
+        logger.info(
+            "Committed turn suppressed",
+            call_sid=self._call_sid,
+            turn_index=turn.turn_index,
+            ignored_reason=ignored_reason,
+        )
+
+    async def _handle_runtime_exception(
+        self,
+        *,
+        turn: TurnInput,
+        pre_turn_phase: str,
+        exc: Exception,
+    ) -> None:
+        logger.exception(
+            "Conversation runtime failed; using safe fallback",
+            call_sid=self._call_sid,
+            turn_index=turn.turn_index,
+            error=str(exc),
+        )
+        self._append_transcript_event(
+            role="user",
+            phase=pre_turn_phase,
+            text=turn.text,
+        )
+        try:
+            self._conversation_runtime.set_phase("closing")
+            self._sync_conversation_snapshot()
+        except Exception:
+            logger.exception(
+                "Failed to update runtime closing state after runtime error",
+                call_sid=self._call_sid,
+                turn_index=turn.turn_index,
+            )
+        self._append_transcript_event(
+            role="assistant",
+            phase="closing",
+            text=RUNTIME_ERROR_FALLBACK_TEXT,
+        )
+        await self.push_frame(
+            TTSSpeakFrame(RUNTIME_ERROR_FALLBACK_TEXT, append_to_context=True),
+            FrameDirection.DOWNSTREAM,
+        )
+        self._closing_done = True
 
     def _log_turn_collection_result(self, result: TurnCollectionResult) -> None:
         if result.ignored_reason is None and result.turn is None:
@@ -313,12 +431,8 @@ class UserConversationProcessor(FrameProcessor):
 def _record_greeting(
     *,
     call_sid: str,
-    state: ConversationRuntimeState,
     greeting_text: str,
 ) -> None:
-    state.recent_events.append(
-        {"role": "assistant", "phase": "greeting", "text": greeting_text}
-    )
     append_session_transcript_event(
         call_sid,
         role="assistant",
@@ -335,7 +449,7 @@ def _build_pipeline_processors(
     call_sid: str,
     stream_sid: str | None = None,
     opening_mode: Literal["outbound", "default"] = "default",
-    conversation_state: ConversationRuntimeState | None = None,
+    conversation_runtime: ConversationRuntime | None = None,
 ) -> list[Any]:
     """Construct the full pipeline processor list for one call."""
 
@@ -343,16 +457,18 @@ def _build_pipeline_processors(
     tts = _build_tts(snapshot, settings)
     context = _build_context(snapshot)
     aggregator_pair = _build_aggregator_pair(context)
-    conversation_state = conversation_state or ConversationRuntimeState(
-        phase="greeting" if opening_mode == "outbound" else "task"
+    conversation_runtime = conversation_runtime or _build_conversation_runtime(
+        call_sid=call_sid,
+        stream_sid=stream_sid,
+        snapshot=snapshot,
+        settings=settings,
+        opening_mode=opening_mode,
     )
     conversation_processor = UserConversationProcessor(
         call_sid=call_sid,
         stream_sid=stream_sid,
-        state=conversation_state,
-        snapshot=snapshot,
-        settings=settings,
-        opening_mode=opening_mode,
+        conversation_runtime=conversation_runtime,
+        greeting_audio_pending=opening_mode == "outbound",
     )
 
     if hasattr(stt, "event_handler"):
@@ -442,10 +558,6 @@ async def run_pipeline(
     log = logger.bind(call_sid=call_sid)
 
     # --- Pipeline assembly ---
-    conversation_state = ConversationRuntimeState(
-        phase="greeting" if opening_mode == "outbound" else "task"
-    )
-
     pipeline = Pipeline(
         _build_pipeline_processors(
             transport=transport,
@@ -454,7 +566,6 @@ async def run_pipeline(
             call_sid=call_sid,
             stream_sid=stream_sid,
             opening_mode=opening_mode,
-            conversation_state=conversation_state,
         )
     )
 
@@ -530,17 +641,13 @@ async def run_pipeline(
         )
         _record_greeting(
             call_sid=call_sid,
-            state=conversation_state,
             greeting_text=cleaned_greeting,
         )
-        conversation_state.phase = "greeting"
-        conversation_state.greeting_audio_pending = True
         await task.queue_frame(TTSSpeakFrame(cleaned_greeting, append_to_context=True))
     else:
         cleaned_greeting = _normalize_transcript_text(snapshot["INITIAL_GREETING_FALLBACK_TEXT"])
         _record_greeting(
             call_sid=call_sid,
-            state=conversation_state,
             greeting_text=cleaned_greeting,
         )
         await task.queue_frame(TTSSpeakFrame(cleaned_greeting, append_to_context=True))

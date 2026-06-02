@@ -1107,10 +1107,15 @@
     {% for session in sessions %}
     <div class="session-item">
         {% set profile = session.config_snapshot.bot_profile | default({}, true) %}
+        {% set conversation_state = session.conversation_state | default({}, true) %}
         <div class="session-meta">
             <span class="session-id">SID: {{ session.call_sid[:12] }}...</span>
             <span class="session-info">Profile: {{ profile.name | default('N/A', true) }}</span>
             <span class="session-info">Model: {{ session.config_snapshot.LLM_MODEL }}</span>
+            <span class="session-info">Phase: {{ conversation_state.phase | default('unknown', true) }}</span>
+            {% if conversation_state.active_slot_id %}
+            <span class="session-info">Slot: {{ conversation_state.active_slot_id }}</span>
+            {% endif %}
         </div>
         <span class="session-badge">
             <span class="pulse-indicator"></span>
@@ -1293,6 +1298,33 @@
         <td>Initial Greeting</td>
         <td>{{ log.config_snapshot.INITIAL_GREETING_PROMPT | default('N/A', true) }}</td>
     </tr>
+</table>
+{% endif %}
+
+{% if log.conversation_state %}
+<table class="config-table">
+    <tr>
+        <td>Conversation Phase</td>
+        <td>{{ log.conversation_state.phase | default('unknown', true) }}</td>
+    </tr>
+    <tr>
+        <td>Active Slot</td>
+        <td>{{ log.conversation_state.active_slot_id | default('None', true) }}</td>
+    </tr>
+    {% if log.conversation_state.slots %}
+    <tr>
+        <td>Slot State</td>
+        <td>
+            {% for slot_id, slot in log.conversation_state.slots.items() %}
+            <div>
+                <strong>{{ slot_id }}</strong>:
+                {{ slot.status | default('unknown', true) }}
+                {% if slot.value %}- {{ slot.value }}{% endif %}
+            </div>
+            {% endfor %}
+        </td>
+    </tr>
+    {% endif %}
 </table>
 {% endif %}
 

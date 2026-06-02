@@ -2,13 +2,9 @@ import pytest
 
 from app.config import get_settings
 from app.runtime import build_config_snapshot
+from app.services import conversation_controller
 from app.services.conversation_controller import (
-    ConversationRuntimeState,
-    TurnDecision,
-    apply_turn_decision,
-    safe_turn_decision,
     validate_greeting_text,
-    validate_turn_decision,
 )
 
 
@@ -24,48 +20,11 @@ def test_greeting_validation_accepts_readiness_question():
     )
 
 
-def test_turn_decision_rejects_simulated_user_text():
-    with pytest.raises(ValueError):
-        validate_turn_decision(
-            {
-                "phase": "task",
-                "assistant_text": "What role are you applying for? User: Product Manager.",
-                "user_intent": "answer",
-                "should_end_call": False,
-            }
-        )
-
-
-def test_turn_decision_rejects_multiple_questions():
-    with pytest.raises(ValueError):
-        validate_turn_decision(
-            {
-                "phase": "task",
-                "assistant_text": "What is your name? Where are you located?",
-                "user_intent": "answer",
-                "should_end_call": False,
-            }
-        )
-
-
-def test_safe_turn_decision_shape():
-    decision = safe_turn_decision(phase="readiness")
-    assert decision.phase == "readiness"
-    assert decision.user_intent == "unclear"
-    assert decision.assistant_text
-
-
-def test_apply_turn_decision_moves_phase():
-    state = ConversationRuntimeState(phase="awaiting_readiness")
-    apply_turn_decision(
-        state,
-        TurnDecision(
-            phase="task",
-            assistant_text="Great. What is your full name?",
-            user_intent="ready",
-        ),
-    )
-    assert state.phase == "task"
+def test_legacy_turn_decision_api_is_removed():
+    assert not hasattr(conversation_controller, "ConversationRuntimeState")
+    assert not hasattr(conversation_controller, "TurnDecision")
+    assert not hasattr(conversation_controller, "decide_next_turn")
+    assert not hasattr(conversation_controller, "apply_turn_decision")
 
 
 def test_config_snapshot_splits_greeting_fields():

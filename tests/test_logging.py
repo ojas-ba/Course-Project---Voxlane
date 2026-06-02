@@ -182,6 +182,10 @@ def test_finalize_call_log_includes_transcript():
         call_sid="call_123",
         stream_sid="stream_456",
         config_snapshot={"LLM_MODEL": "test-model"},
+        conversation_state={
+            "phase": "collecting",
+            "slots": {"name": {"status": "collected", "value": "Ana"}},
+        },
         metrics={
             "first_bot_speech_latency_secs": 0.9,
             "turn_count": 1,
@@ -209,6 +213,10 @@ def test_finalize_call_log_includes_transcript():
     assert len(call_log.transcript) == 2
     assert call_log.transcript[0].event_index == 1
     assert call_log.transcript[0].text == "Hello"
+    assert call_log.conversation_state == {
+        "phase": "collecting",
+        "slots": {"name": {"status": "collected", "value": "Ana"}},
+    }
 
 
 def test_finalize_call_log_skips_incomplete_turns():

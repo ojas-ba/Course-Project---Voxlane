@@ -9,7 +9,7 @@ Transcript data is stored as chronological role-based events.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -95,6 +95,7 @@ class CallLog(BaseModel):
     call_sid: str
     stream_sid: str
     config_snapshot: dict  # ConfigSnapshot as plain dict for MongoDB
+    conversation_state: dict[str, Any] | None = None
     metrics: CallMetrics = Field(default_factory=CallMetrics)
     transcript: list[TranscriptEvent] = Field(default_factory=list)
     completed: bool = True

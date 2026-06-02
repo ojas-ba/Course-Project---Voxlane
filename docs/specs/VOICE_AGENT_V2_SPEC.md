@@ -239,11 +239,12 @@ Not responsible for:
 
 Responsible for converting STT/turn events into committed user turns.
 
-It must prevent this bad flow:
+It must prevent this old bad flow. This path is historical and must not be
+reintroduced as active committed-turn behavior:
 
 ```text
 TranscriptionFrame.finalized
--> immediately call decide_next_turn()
+-> immediately call legacy turn-decision logic
 -> bot replies too early
 ```
 
@@ -254,7 +255,13 @@ STT fragments / Flux events
 -> TurnCollector
 -> committed TurnInput
 -> ConversationRuntime.handle_turn(...)
+-> RuntimeResult
+-> TTSSpeakFrame
 ```
+
+`conversation_controller` no longer owns committed-turn decisions.
+`conversation_controller.generate_outbound_greeting_text()` may still be used
+for outbound greeting text generation before the call connects.
 
 ### 8.3 `app/services/conversation_runtime.py`
 
@@ -745,15 +752,14 @@ class TurnResult(BaseModel):
 2. Deepgram Flux streams transcript/turn events.
 3. TurnCollector observes events.
 4. TurnCollector emits TurnInput only after committed turn.
-5. ConversationRuntime.handle_turn(TurnInput, ConversationState) runs.
-6. FlowRunner identifies current node/slot.
-7. LLMAdapter is called only if needed.
-8. SlotState is updated.
-9. RepeatedQuestionGuard validates next response.
-10. SpeechComposer creates final assistant_text.
-11. Pipecat sends text to Cartesia TTS.
-12. TTS audio is streamed back through Exotel.
-13. Transcript and metrics are updated.
+5. ConversationRuntime.handle_turn(TurnInput) runs.
+6. SimpleFlowRunner identifies current slot/action.
+7. RepeatedQuestionGuard validates the next action.
+8. SpeechComposer creates final assistant text.
+9. RuntimeResult returns a deep-copied ConversationState snapshot.
+10. Pipecat sends RuntimeResult.assistant_text to Cartesia TTS.
+11. TTS audio is streamed back through Exotel.
+12. Transcript, metrics, and conversation_state snapshot are updated.
 ```
 
 ### 11.3 Call completion flow
@@ -761,12 +767,16 @@ class TurnResult(BaseModel):
 ```text
 1. Call ends normally, user refuses, or error occurs.
 2. Pipeline shuts down.
-3. Final transcript, metrics, state snapshot, config snapshot, and error summary are assembled.
+3. Final transcript, metrics, conversation_state snapshot, config snapshot, and error summary are assembled.
 4. Final call log is persisted to MongoDB.
 5. ACTIVE_SESSION entry is deleted.
 ```
 
 Do not write every live turn to MongoDB in the hot path for V2 unless needed for debugging. In-memory state is sufficient for single-call demo scope.
+Do not store live runtime, Pipecat, provider, task, lock, or client objects in
+ACTIVE_SESSIONS. ACTIVE_SESSIONS may store JSON-safe conversation_state
+snapshots only. CallLog may persist optional conversation_state for final
+debugging and dashboard visibility.
 
 ---
 

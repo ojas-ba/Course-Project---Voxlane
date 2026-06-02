@@ -32,23 +32,39 @@ This document covers:
 
 It does not implement those modules.
 
-## 3. Current Legacy Flow
+## 3. Current Phase 3 Runtime Flow
 
-The current legacy runtime path is:
+The current committed-turn runtime path is:
 
 ```text
 Exotel WebSocket
 -> Pipecat pipeline
 -> Deepgram Flux STT
--> legacy UserConversationProcessor
--> conversation_controller.decide_next_turn()
+-> TurnCollector
+-> committed TurnInput
+-> UserConversationProcessor._handle_committed_turn()
+-> ConversationRuntime.handle_turn()
+-> SimpleFlowRunner
+-> RepeatedQuestionGuard
+-> SpeechComposer
+-> RuntimeResult
+-> TTSSpeakFrame
 -> Cartesia TTS
 -> Exotel audio output
 ```
 
-In `app/services/pipecat_pipeline.py`, `UserConversationProcessor` receives downstream finalized `TranscriptionFrame` objects. When `frame.finalized` is true and the greeting is not pending, it normalizes the text, appends transcript events, calls `conversation_controller.decide_next_turn()`, applies the returned `TurnDecision`, and sends the assistant text to TTS with `TTSSpeakFrame`.
+In `app/services/pipecat_pipeline.py`, `UserConversationProcessor` receives
+downstream finalized `TranscriptionFrame` objects for buffering/reference only.
+Committed turns come from Deepgram Flux EndOfTurn through `TurnCollector`.
+`UserConversationProcessor` then calls `ConversationRuntime.handle_turn()` and
+sends `RuntimeResult.assistant_text` to TTS with `TTSSpeakFrame`.
 
-Current problems:
+`conversation_controller` no longer owns committed-turn decisions.
+`decide_next_turn()` and `apply_turn_decision()` are removed from active app
+code. `conversation_controller.generate_outbound_greeting_text()` may still be
+used before an outbound call connects to prepare greeting text.
+
+Historical problems Phase 3 fixed:
 
 - finalized STT fragments can trigger assistant responses too early
 - LLM currently has too much responsibility for flow decisions
@@ -77,13 +93,15 @@ Exotel WebSocket
 
 The pipeline remains the audio/frame routing layer. Conversation policy moves behind committed-turn and runtime-state contracts.
 
-Phase 2 bridge rule:
+Phase 3 bridge rule:
 
-- ConversationRuntime does not exist until Phase 3.
-- Phase 2 may temporarily route committed TurnInput into the existing legacy conversation controller path.
-- Allowed temporarily: `TurnCollector -> legacy UserConversationProcessor / conversation_controller`.
-- Not allowed: `raw finalized TranscriptionFrame -> decide_next_turn()`.
-- Phase 2 must not start building ConversationRuntime just to finish TurnCollector wiring.
+- TurnCollector remains the committed-turn gate.
+- Active committed turns must route to `ConversationRuntime.handle_turn()`.
+- Raw finalized STT remains buffer/reference only.
+- Deepgram EndOfTurn remains the primary commit signal.
+- EagerEndOfTurn and TurnResumed remain non-response triggers.
+- Not allowed: `raw finalized TranscriptionFrame -> committed-turn runtime`.
+- Not allowed: committed-turn decisions owned by `conversation_controller`.
 
 ## 5. Core Design Principles
 
@@ -197,7 +215,7 @@ Bad flow:
 
 ```text
 TranscriptionFrame.finalized
--> decide_next_turn()
+-> committed-turn decision
 -> assistant speaks
 ```
 
@@ -335,6 +353,9 @@ Rules:
 - Do not store provider service objects.
 - Do not store live transport/task/runner objects.
 - Keep only call/session IDs, phase, active node/slot, slot state, transcript metadata, counters, timestamps, and debug-safe metadata.
+- Do not store `ConversationRuntime` itself in `ACTIVE_SESSIONS`.
+- `ACTIVE_SESSIONS` stores only JSON-safe `conversation_state` snapshots.
+- `CallLog` persists optional `conversation_state` so final slot state survives session cleanup.
 
 ## 13. SlotState Rules
 
@@ -610,7 +631,7 @@ Explicitly out of scope for this design checkpoint:
 ## 24. Phase Mapping
 
 - Phase 2 implements TurnCollector and committed TurnInput emission.
-- Phase 3 implements ConversationRuntime, ConversationState, SlotState, FlowRunner, RepeatedQuestionGuard, and SpeechComposer.
+- Phase 3 implements ConversationRuntime, ConversationState, SlotState, FlowRunner, RepeatedQuestionGuard, SpeechComposer, and the active runtime bridge.
 - Phase 4 implements LLMAdapter and full LLM/provider metrics.
 - Phase 5 stabilizes demo behavior.
 
@@ -631,3 +652,9 @@ This docs-only task is complete when:
 - no runtime code changed
 - no tests changed
 - no secrets changed
+
+## 26. Phase 3F Future Hardening Notes
+
+- Mongo startup currently tolerates broad startup exceptions for local demo
+  resilience. Before production, narrow this to known Mongo, network, or config
+  availability errors.

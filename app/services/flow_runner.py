@@ -390,17 +390,62 @@ def _is_recognized_question(lowered_text: str) -> bool:
 
 
 def _is_ready(lowered_text: str) -> bool:
-    cleaned = lowered_text.strip(" .!?")
-    return cleaned in {
-        "ready",
+    cleaned = _normalize_for_intent(lowered_text)
+    if not cleaned:
+        return False
+    if re.search(r"\b(?:no|nope|not|don'?t|do not|cannot|can'?t)\b", cleaned):
+        return False
+    if lowered_text.strip().endswith("?") and re.match(
+        r"^(?:what|why|how|when|where|who|are|is|do|can|could|should)\b",
+        cleaned,
+    ):
+        return False
+
+    ready_phrases = (
+        "go ahead",
+        "please continue",
+        "continue",
+        "i am ready",
+        "i'm ready",
+        "im ready",
+        "i am good",
+        "i'm good",
+        "all set",
+        "lets start",
+        "let's start",
+        "start",
+        "sounds good",
+        "that works",
+        "now is fine",
+    )
+    if any(re.search(rf"\b{re.escape(phrase)}\b", cleaned) for phrase in ready_phrases):
+        return True
+
+    affirmation_tokens = {
         "yes",
         "yeah",
-        "go ahead",
-        "continue",
-        "please continue",
-        "yes go ahead",
-        "yes, go ahead",
+        "yep",
+        "ya",
+        "sure",
+        "ok",
+        "okay",
+        "ready",
+        "please",
+        "fine",
+        "good",
+        "man",
+        "bro",
+        "sir",
+        "maam",
+        "mam",
     }
+    tokens = cleaned.split()
+    return bool(tokens) and all(token in affirmation_tokens for token in tokens)
+
+
+def _normalize_for_intent(text: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9'\s]+", " ", text.casefold())
+    return " ".join(cleaned.split())
 
 
 def _extract_name(text: str) -> str | None:

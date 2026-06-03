@@ -67,7 +67,8 @@ class ConversationRuntime:
             )
 
             raw_action = self._raw_action_for_turn(turn)
-            guarded_action, guard_skipped = self._guard_action(raw_action)
+            capped_action, readiness_cap_applied = self._cap_global_readiness_clarify(raw_action)
+            guarded_action, guard_skipped = self._guard_action(capped_action)
             final_action, sanity_replaced = self._post_guard_sanity_check(guarded_action)
             final_action = self._normalize_close_action(final_action)
 
@@ -84,6 +85,7 @@ class ConversationRuntime:
 
             debug = {
                 "raw_action": raw_action.model_dump(mode="json"),
+                "readiness_cap_applied": readiness_cap_applied,
                 "guarded_action": guarded_action.model_dump(mode="json"),
                 "final_action": final_action.model_dump(mode="json"),
                 "guard_skipped_for_global_clarify": guard_skipped,
@@ -152,6 +154,22 @@ class ConversationRuntime:
             fallback_policy=self._fallback_policy,
         )
 
+    def _cap_global_readiness_clarify(self, action: RuntimeAction) -> tuple[RuntimeAction, bool]:
+        if not self._is_global_clarify(action):
+            return action, False
+
+        max_attempts = max(self._fallback_policy.max_attempts, 1)
+        if self._state.readiness_attempts >= max_attempts - 1:
+            return (
+                RuntimeAction(
+                    action_type="close",
+                    should_end_call=True,
+                    reason="readiness_max_attempts",
+                ),
+                True,
+            )
+        return action, False
+
     def _guard_action(self, raw_action: RuntimeAction) -> tuple[RuntimeAction, bool]:
         if self._is_global_clarify(raw_action):
             # Global readiness clarifies are not repeated slot questions.
@@ -212,13 +230,21 @@ class ConversationRuntime:
             self._apply_slot_prompt_side_effects(slot_id=action.slot_id, increment_attempts=True)
         elif action.action_type == "clarify" and action.slot_id is not None:
             self._apply_slot_prompt_side_effects(slot_id=action.slot_id, increment_attempts=True)
+        elif action.action_type == "clarify" and action.slot_id is None and self._state.phase == "readiness":
+            self._state.readiness_attempts += 1
+            self._state.fallback_count += 1
         elif action.action_type == "answer_then_ask" and action.slot_id is not None:
             self._apply_slot_prompt_side_effects(slot_id=action.slot_id, increment_attempts=False)
         elif action.action_type == "close":
+            if action.reason == "readiness_max_attempts":
+                self._state.fallback_count += 1
             if self._state.phase != "ended":
                 self._state.phase = "closing"
         elif action.action_type == "fallback":
             self._state.fallback_count += 1
+
+        if action.reason == "readiness_confirmed":
+            self._state.readiness_attempts = 0
 
         if action.reason == "refusal":
             self._state.refusal_count += 1

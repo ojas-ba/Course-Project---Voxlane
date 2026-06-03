@@ -108,6 +108,24 @@ def test_readiness_yes_moves_to_collecting_and_asks_first_slot():
     assert action.reason == "readiness_confirmed"
 
 
+def test_readiness_common_affirmatives_move_to_collecting():
+    runner = SimpleFlowRunner()
+
+    for text in ("Yeah. Sure.", "Yeah. Yeah. I'm ready.", "I'm ready, man.", "Yes. Yes."):
+        state = ConversationState(call_sid="call_123", phase="readiness")
+
+        action = runner.handle_turn(
+            state=state,
+            turn=_turn(text, phase="readiness"),
+            flow_definition=_flow(),
+        )
+
+        assert state.phase == "collecting"
+        assert state.active_slot_id == "name"
+        assert action.action_type == "ask_slot"
+        assert action.slot_id == "name"
+
+
 def test_random_hello_does_not_start_collection_from_readiness():
     state = ConversationState(call_sid="call_123", phase="readiness")
     runner = SimpleFlowRunner()
@@ -118,6 +136,17 @@ def test_random_hello_does_not_start_collection_from_readiness():
     assert state.active_slot_id is None
     assert action.action_type == "clarify"
     assert action.reason == "readiness_unclear"
+
+
+def test_readiness_question_does_not_start_collection():
+    state = ConversationState(call_sid="call_123", phase="readiness")
+    runner = SimpleFlowRunner()
+
+    action = runner.handle_turn(state=state, turn=_turn("Are you ready?", phase="readiness"), flow_definition=_flow())
+
+    assert state.phase == "readiness"
+    assert state.active_slot_id is None
+    assert action.action_type == "clarify"
 
 
 def test_refusal_closes_before_extraction():

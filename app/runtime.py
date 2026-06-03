@@ -65,6 +65,7 @@ class PendingOutboundContext(TypedDict):
     opening_state: OpeningState
     greeting_text: str | None
     greeting_error: str | None
+    greeting_metrics: dict[str, Any]
     created_at: float
 
 
@@ -123,7 +124,12 @@ def delete_session(call_sid: str) -> RuntimeSession | None:
 # --- Phase 3: Session update helpers for metrics capture ---
 
 
-def update_session_first_latency(call_sid: str, latency_secs: float) -> None:
+def update_session_first_latency(
+    call_sid: str,
+    latency_secs: float,
+    *,
+    observed_at: float | None = None,
+) -> None:
     """Set the first-bot-speech latency for a session (once only).
 
     Called from the on_first_bot_speech_latency observer callback.
@@ -141,6 +147,25 @@ def update_session_first_latency(call_sid: str, latency_secs: float) -> None:
     if session["first_latency"] is None:
         session["first_latency"] = latency_secs
         session["metrics"]["first_bot_speech_latency_secs"] = latency_secs
+        session["metrics"]["first_bot_audio_started_at"] = observed_at or time.time()
+
+
+def update_session_metric(call_sid: str, key: str, value: Any) -> None:
+    """Set one JSON-safe metric value for an active session."""
+
+    session = ACTIVE_SESSIONS.get(call_sid)
+    if session is None:
+        return
+    session["metrics"][key] = json.loads(json.dumps(value))
+
+
+def merge_session_metrics(call_sid: str, metrics: dict[str, Any]) -> None:
+    """Merge JSON-safe metric values into an active session."""
+
+    session = ACTIVE_SESSIONS.get(call_sid)
+    if session is None:
+        return
+    session["metrics"].update(json.loads(json.dumps(metrics)))
 
 
 def append_session_turn_metrics(call_sid: str, turn_metrics: dict[str, Any]) -> None:
@@ -179,6 +204,7 @@ def create_pending_outbound_context(
     config_snapshot: ConfigSnapshot,
     greeting_text: str | None = None,
     greeting_error: str | None = None,
+    greeting_metrics: dict[str, Any] | None = None,
 ) -> PendingOutboundContext:
     """Create a pending outbound context before Exotel returns a call SID."""
 
@@ -189,6 +215,7 @@ def create_pending_outbound_context(
         "opening_state": "preparing",
         "greeting_text": greeting_text,
         "greeting_error": greeting_error,
+        "greeting_metrics": json.loads(json.dumps(greeting_metrics or {})),
         "created_at": time.time(),
     }
 

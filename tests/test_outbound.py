@@ -54,6 +54,13 @@ def test_dashboard_outbound_creates_pending_context(client):
     assert PENDING_OUTBOUND_CALLS["call_123"]["greeting_text"] == (
         "Hi, is now a good time to continue?"
     )
+    greeting_metrics = PENDING_OUTBOUND_CALLS["call_123"]["greeting_metrics"]
+    assert greeting_metrics["greeting_text_source"] == "llm"
+    assert greeting_metrics["greeting_text_ready_before_dial"] is True
+    assert greeting_metrics["greeting_llm_total_latency"] is not None
+    assert greeting_metrics["greeting_generation_completed_at"] >= (
+        greeting_metrics["greeting_generation_started_at"]
+    )
     assert PENDING_OUTBOUND_CALLS["call_123"]["config_snapshot"]["SAMPLE_RATE"] == 16000
     assert (
         PENDING_OUTBOUND_CALLS["call_123"]["config_snapshot"]["bot_profile"]["id"]
@@ -147,6 +154,33 @@ def test_dashboard_outbound_rejects_success_without_call_sid(client):
     assert response.status_code == 200
     assert "Exotel did not return a CallSid." in response.text
     assert PENDING_OUTBOUND_CALLS == {}
+
+
+def test_dashboard_outbound_records_fallback_greeting_metrics_on_generation_failure(client):
+    mock_exotel_client = AsyncMock()
+    mock_exotel_client.make_call.return_value = ExotelCallResult(
+        success=True,
+        call_sid="call_fallback",
+    )
+    client.app.state.exotel_client = mock_exotel_client
+
+    with patch(
+        "app.routers.dashboard.generate_outbound_greeting_text",
+        new_callable=AsyncMock,
+    ) as mock_greeting:
+        mock_greeting.side_effect = ValueError("LLM generation returned no text")
+        response = client.post(
+            "/telephony/outbound",
+            data={"to_number": "+919876543210"},
+        )
+
+    assert response.status_code == 200
+    pending = PENDING_OUTBOUND_CALLS["call_fallback"]
+    assert pending["greeting_text"] is None
+    assert pending["greeting_error"] == "LLM generation returned no text"
+    assert pending["greeting_metrics"]["greeting_text_source"] == "fallback"
+    assert pending["greeting_metrics"]["greeting_text_ready_before_dial"] is True
+    assert pending["greeting_metrics"]["greeting_llm_total_latency"] is not None
 
 @pytest.mark.asyncio
 async def test_exotel_outbound_client_success():

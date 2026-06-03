@@ -16,6 +16,7 @@ from app.runtime import (
     cleanup_expired_pending_outbound_contexts,
     get_pending_outbound_context,
     get_session,
+    merge_session_metrics,
     pop_pending_outbound_context,
 )
 from app.services.pipecat_pipeline import run_pipeline
@@ -147,6 +148,8 @@ async def exotel_websocket(websocket: WebSocket) -> None:
 
         created_call_sid = call_sid
         if pending_context is not None:
+            merge_session_metrics(call_sid, pending_context.get("greeting_metrics", {}))
+        if pending_context is not None:
             pop_pending_outbound_context(call_sid)
 
         log = logger.bind(call_sid=call_sid, stream_sid=stream_sid)
@@ -173,7 +176,9 @@ async def exotel_websocket(websocket: WebSocket) -> None:
                 else None
             ),
             opening_mode="outbound" if pending_context is not None else "default",
-            greeting_start_delay_ms=settings.outbound_greeting_start_delay_ms,
+            greeting_start_delay_ms=(
+                0 if pending_context is not None else settings.outbound_greeting_start_delay_ms
+            ),
         )
 
         if result.error:

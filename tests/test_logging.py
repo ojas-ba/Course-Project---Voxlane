@@ -217,6 +217,8 @@ def test_finalize_call_log_includes_transcript():
         "phase": "collecting",
         "slots": {"name": {"status": "collected", "value": "Ana"}},
     }
+    assert call_log.conversation_outcome == "incomplete"
+    assert call_log.final_conversation_phase == "collecting"
 
 
 def test_finalize_call_log_skips_incomplete_turns():
@@ -250,3 +252,70 @@ def test_finalize_call_log_accepts_expanded_v2_snapshot():
 
     assert call_log.config_snapshot["snapshot_version"] == "v2_phase1"
     assert call_log.config_snapshot["bot_profile"]["id"] == "default_demo_bot"
+
+
+def test_finalize_call_log_separates_transport_completed_from_readiness_failed():
+    snapshot = build_config_snapshot(get_settings())
+
+    call_log = finalize_call_log(
+        call_sid="call_123",
+        stream_sid="stream_456",
+        config_snapshot=snapshot,
+        conversation_state={
+            "phase": "readiness",
+            "slots": {
+                "name": {"status": "missing", "value": None},
+                "location": {"status": "missing", "value": None},
+                "role": {"status": "missing", "value": None},
+            },
+        },
+        metrics={
+            "greeting_text_source": "fallback",
+            "greeting_text_ready_before_dial": True,
+            "greeting_llm_total_latency": 0.2,
+            "first_tts_frame_queued_at": 1.0,
+            "first_bot_audio_started_at": 2.0,
+        },
+        transcript=[],
+        completed=True,
+        error=None,
+    )
+
+    assert call_log.completed is True
+    assert call_log.call_transport_status == "completed"
+    assert call_log.conversation_outcome == "readiness_failed"
+    assert call_log.final_conversation_phase == "readiness"
+    assert call_log.slots_collected_count == 0
+    assert call_log.required_slots_missing == ["name", "location", "role"]
+    assert call_log.metrics.greeting_text_source == "fallback"
+    assert call_log.metrics.greeting_text_ready_before_dial is True
+    assert call_log.metrics.greeting_llm_total_latency == 0.2
+    assert call_log.metrics.first_tts_frame_queued_at == 1.0
+    assert call_log.metrics.first_bot_audio_started_at == 2.0
+
+
+def test_finalize_call_log_marks_completed_logical_outcome_when_required_slots_collected():
+    snapshot = build_config_snapshot(get_settings())
+
+    call_log = finalize_call_log(
+        call_sid="call_123",
+        stream_sid="stream_456",
+        config_snapshot=snapshot,
+        conversation_state={
+            "phase": "closing",
+            "slots": {
+                "name": {"status": "collected", "value": "Ojas"},
+                "location": {"status": "collected", "value": "Bangalore"},
+                "role": {"status": "collected", "value": "backend developer"},
+            },
+        },
+        metrics={},
+        transcript=[],
+        completed=True,
+        error=None,
+    )
+
+    assert call_log.conversation_outcome == "completed"
+    assert call_log.final_conversation_phase == "closing"
+    assert call_log.slots_collected_count == 3
+    assert call_log.required_slots_missing == []

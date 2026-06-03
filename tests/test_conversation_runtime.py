@@ -239,7 +239,18 @@ def test_readiness_yes_asks_first_slot_and_moves_to_collecting():
     assert result.state.slots["name"].attempts == 1
 
 
-def test_unclear_readiness_clarifies_and_stays_readiness_without_attempt_increment():
+def test_readiness_punctuated_affirmative_asks_first_slot():
+    runtime = ConversationRuntime(state=_state(phase="readiness"), flow_definition=_flow([_slot("name")]))
+
+    result = runtime.handle_turn(_turn("Yeah. Sure.", phase="readiness"))
+
+    assert result.action.action_type == "ask_slot"
+    assert result.action.slot_id == "name"
+    assert result.state.phase == "collecting"
+    assert result.state.active_slot_id == "name"
+
+
+def test_unclear_readiness_clarifies_and_stays_readiness_without_slot_attempt_increment():
     runtime = ConversationRuntime(state=_state(phase="readiness"), flow_definition=_flow([_slot("name")]))
 
     result = runtime.handle_turn(_turn("hello", phase="readiness"))
@@ -251,6 +262,24 @@ def test_unclear_readiness_clarifies_and_stays_readiness_without_attempt_increme
     assert result.state.active_slot_id is None
     assert result.state.last_asked_slot_id is None
     assert result.state.slots["name"].attempts == 0
+    assert result.state.readiness_attempts == 1
+    assert result.state.fallback_count == 1
+    assert "Should I continue" in result.assistant_text
+
+
+def test_repeated_unclear_readiness_closes_after_cap():
+    runtime = ConversationRuntime(state=_state(phase="readiness"), flow_definition=_flow([_slot("name")]))
+
+    first = runtime.handle_turn(_turn("hello", phase="readiness", turn_index=1))
+    second = runtime.handle_turn(_turn("maybe", phase="readiness", turn_index=2))
+
+    assert first.action.action_type == "clarify"
+    assert second.action.action_type == "close"
+    assert second.action.reason == "readiness_max_attempts"
+    assert second.should_end_call is True
+    assert second.state.phase == "closing"
+    assert second.state.active_slot_id is None
+    assert second.state.slots["name"].attempts == 0
 
 
 def test_refusal_closes_sets_closing_and_increments_refusal_count():
@@ -529,7 +558,8 @@ def test_two_runtime_instances_are_isolated():
     assert first_snapshot.last_user_text == "yes"
     assert second_snapshot.last_user_text == "hello"
     assert first_snapshot.fallback_count == 0
-    assert second_snapshot.fallback_count == 0
+    assert second_snapshot.fallback_count == 1
+    assert second_snapshot.readiness_attempts == 1
 
 
 def test_conversation_runtime_has_no_module_level_mutable_runtime_state():

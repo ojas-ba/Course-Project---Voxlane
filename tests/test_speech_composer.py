@@ -114,6 +114,19 @@ def test_readiness_answer_then_ask_without_slot_is_safe():
     assert text.count("?") == 1
 
 
+def test_readiness_clarify_without_slot_asks_direct_yes_no_question():
+    composer = SpeechComposer()
+
+    text = composer.compose(
+        action=RuntimeAction(action_type="clarify", slot_id=None, reason="readiness_unclear"),
+        state=ConversationState(call_sid="call_123", phase="readiness"),
+        flow_definition=_flow(),
+    )
+
+    assert "Should I continue" in text
+    assert text.count("?") == 1
+
+
 def test_refusal_close_uses_fallback_refusal_text():
     composer = SpeechComposer()
     policy = FallbackPolicy(refusal_text="No problem, we can stop here. Thank you.")
@@ -156,6 +169,22 @@ def test_other_close_uses_stop_text():
     )
 
     assert text == "Understood. I will end the call now. Thank you."
+
+
+def test_readiness_max_attempts_close_uses_safe_stop_text():
+    composer = SpeechComposer()
+
+    text = composer.compose(
+        action=RuntimeAction(
+            action_type="close",
+            reason="readiness_max_attempts",
+            should_end_call=True,
+        ),
+        state=ConversationState(call_sid="call_123", phase="closing"),
+        flow_definition=_flow(),
+    )
+
+    assert text == "Sorry, I am having trouble confirming readiness. We can stop here for now."
 
 
 def test_unsafe_configured_question_falls_back_safely():

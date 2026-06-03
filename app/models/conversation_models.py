@@ -104,6 +104,7 @@ class ConversationState(BaseModel):
     slots: dict[str, SlotState] = Field(default_factory=dict)
     turn_count: int = 0
     fallback_count: int = 0
+    readiness_attempts: int = 0
     refusal_count: int = 0
     last_user_text: str | None = None
     last_assistant_text: str | None = None

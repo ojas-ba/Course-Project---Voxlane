@@ -3,6 +3,7 @@
 import os
 import re
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
@@ -152,26 +153,74 @@ async def post_outbound(request: Request) -> Response:
     snapshot = build_config_snapshot(settings, profile_id=bot_profile_id)
     greeting_text: str | None = None
     greeting_error: str | None = None
+    greeting_started_at = time.time()
+    greeting_metrics: dict[str, Any] = {
+        "greeting_generation_started_at": greeting_started_at,
+        "greeting_generation_completed_at": None,
+        "greeting_llm_ttfb": None,
+        "greeting_llm_total_latency": None,
+        "greeting_text_ready_before_dial": True,
+        "greeting_text_source": "fallback",
+    }
 
-    try:
-        async with asyncio.timeout(settings.outbound_greeting_prep_timeout_secs):
-            greeting_text = await generate_outbound_greeting_text(
-                snapshot=snapshot,
-                settings=settings,
-                to_number=to_number,
+    greeting_config = snapshot.get("greeting_config") or {}
+    if greeting_config.get("mode") == "static":
+        greeting_text = (
+            greeting_config.get("static_text")
+            or snapshot["INITIAL_GREETING_FALLBACK_TEXT"]
+        )
+        greeting_completed_at = time.time()
+        greeting_metrics.update(
+            {
+                "greeting_generation_completed_at": greeting_completed_at,
+                "greeting_text_source": "configured",
+            }
+        )
+    else:
+        try:
+            async with asyncio.timeout(settings.outbound_greeting_prep_timeout_secs):
+                greeting_text = await generate_outbound_greeting_text(
+                    snapshot=snapshot,
+                    settings=settings,
+                    to_number=to_number,
+                )
+            greeting_completed_at = time.time()
+            greeting_metrics.update(
+                {
+                    "greeting_generation_completed_at": greeting_completed_at,
+                    "greeting_llm_total_latency": greeting_completed_at - greeting_started_at,
+                    "greeting_text_source": "llm",
+                }
             )
-    except TimeoutError:
-        greeting_error = "Greeting generation timed out"
-        logger.warning("Outbound greeting generation timed out")
-    except Exception as exc:
-        greeting_error = str(exc)
-        logger.warning("Outbound greeting generation failed: {err}", err=str(exc))
+        except TimeoutError:
+            greeting_completed_at = time.time()
+            greeting_error = "Greeting generation timed out"
+            greeting_metrics.update(
+                {
+                    "greeting_generation_completed_at": greeting_completed_at,
+                    "greeting_llm_total_latency": greeting_completed_at - greeting_started_at,
+                    "greeting_text_source": "fallback",
+                }
+            )
+            logger.warning("Outbound greeting generation timed out")
+        except Exception as exc:
+            greeting_completed_at = time.time()
+            greeting_error = str(exc)
+            greeting_metrics.update(
+                {
+                    "greeting_generation_completed_at": greeting_completed_at,
+                    "greeting_llm_total_latency": greeting_completed_at - greeting_started_at,
+                    "greeting_text_source": "fallback",
+                }
+            )
+            logger.warning("Outbound greeting generation failed: {err}", err=str(exc))
 
     pending_context = create_pending_outbound_context(
         to_number=to_number,
         config_snapshot=snapshot,
         greeting_text=greeting_text,
         greeting_error=greeting_error,
+        greeting_metrics=greeting_metrics,
     )
 
     try:

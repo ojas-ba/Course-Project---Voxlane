@@ -80,6 +80,14 @@ class CallMetrics(BaseModel):
     """
 
     first_bot_speech_latency_secs: float | None = None
+    first_bot_audio_started_at: float | None = None
+    first_tts_frame_queued_at: float | None = None
+    greeting_generation_started_at: float | None = None
+    greeting_generation_completed_at: float | None = None
+    greeting_llm_ttfb: float | None = None
+    greeting_llm_total_latency: float | None = None
+    greeting_text_ready_before_dial: bool | None = None
+    greeting_text_source: str | None = None
     turn_count: int = 0
     turns: list[TurnMetrics] = Field(default_factory=list)
 
@@ -100,3 +108,8 @@ class CallLog(BaseModel):
     transcript: list[TranscriptEvent] = Field(default_factory=list)
     completed: bool = True
     error: str | None = None
+    call_transport_status: str = "completed"
+    conversation_outcome: str = "incomplete"
+    final_conversation_phase: str | None = None
+    slots_collected_count: int = 0
+    required_slots_missing: list[str] = Field(default_factory=list)

@@ -25,6 +25,7 @@ from app.models.schemas import (
 )
 
 TTFB_TIE_EPSILON_SECS = 1e-6
+COMPLETED_SLOT_STATUSES = {"collected", "confirmed"}
 
 
 def _map_processor_to_category(processor: str) -> str | None:
@@ -199,6 +200,81 @@ def build_turn_metrics(
     )
 
 
+def _required_slot_ids(config_snapshot: dict[str, Any]) -> list[str]:
+    flow_definition = config_snapshot.get("flow_definition")
+    if not isinstance(flow_definition, dict):
+        return []
+
+    slot_ids: list[str] = []
+    for slot_definition in flow_definition.get("slots", []) or []:
+        if not isinstance(slot_definition, dict):
+            continue
+        slot_id = slot_definition.get("id")
+        if isinstance(slot_id, str) and slot_definition.get("required", True):
+            slot_ids.append(slot_id)
+    return slot_ids
+
+
+def _conversation_summary(
+    *,
+    config_snapshot: dict[str, Any],
+    conversation_state: dict[str, Any] | None,
+    completed: bool,
+    error: str | None,
+) -> dict[str, Any]:
+    if not conversation_state:
+        outcome = "runtime_error" if error else "incomplete"
+        return {
+            "call_transport_status": "completed" if completed else "failed",
+            "conversation_outcome": outcome,
+            "final_conversation_phase": None,
+            "slots_collected_count": 0,
+            "required_slots_missing": _required_slot_ids(config_snapshot),
+        }
+
+    phase = conversation_state.get("phase")
+    slots = conversation_state.get("slots") or {}
+    if not isinstance(slots, dict):
+        slots = {}
+
+    slots_collected_count = sum(
+        1
+        for slot in slots.values()
+        if isinstance(slot, dict) and slot.get("status") in COMPLETED_SLOT_STATUSES
+    )
+
+    required_slot_ids = _required_slot_ids(config_snapshot) or [
+        slot_id for slot_id in slots if isinstance(slot_id, str)
+    ]
+    required_slots_missing = [
+        slot_id
+        for slot_id in required_slot_ids
+        if not (
+            isinstance(slots.get(slot_id), dict)
+            and slots[slot_id].get("status") in COMPLETED_SLOT_STATUSES
+        )
+    ]
+
+    if error:
+        conversation_outcome = (
+            "user_abandoned" if "disconnected" in error.casefold() else "runtime_error"
+        )
+    elif phase in {"closing", "ended"} and not required_slots_missing:
+        conversation_outcome = "completed"
+    elif phase == "readiness":
+        conversation_outcome = "readiness_failed"
+    else:
+        conversation_outcome = "incomplete"
+
+    return {
+        "call_transport_status": "completed" if completed else "failed",
+        "conversation_outcome": conversation_outcome,
+        "final_conversation_phase": phase if isinstance(phase, str) else None,
+        "slots_collected_count": slots_collected_count,
+        "required_slots_missing": required_slots_missing,
+    }
+
+
 def finalize_call_log(
     *,
     call_sid: str,
@@ -233,8 +309,22 @@ def finalize_call_log(
     # Reconstruct typed CallMetrics from the accumulated dict
     call_metrics = CallMetrics(
         first_bot_speech_latency_secs=metrics.get("first_bot_speech_latency_secs"),
+        first_bot_audio_started_at=metrics.get("first_bot_audio_started_at"),
+        first_tts_frame_queued_at=metrics.get("first_tts_frame_queued_at"),
+        greeting_generation_started_at=metrics.get("greeting_generation_started_at"),
+        greeting_generation_completed_at=metrics.get("greeting_generation_completed_at"),
+        greeting_llm_ttfb=metrics.get("greeting_llm_ttfb"),
+        greeting_llm_total_latency=metrics.get("greeting_llm_total_latency"),
+        greeting_text_ready_before_dial=metrics.get("greeting_text_ready_before_dial"),
+        greeting_text_source=metrics.get("greeting_text_source"),
         turn_count=metrics.get("turn_count", 0),
         turns=metrics.get("turns", []),
+    )
+    conversation_summary = _conversation_summary(
+        config_snapshot=config_snapshot,
+        conversation_state=conversation_state,
+        completed=completed,
+        error=error,
     )
 
     call_log = CallLog(
@@ -246,6 +336,7 @@ def finalize_call_log(
         transcript=transcript,
         completed=completed,
         error=error,
+        **conversation_summary,
     )
 
     log.info(

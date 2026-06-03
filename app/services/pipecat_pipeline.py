@@ -16,6 +16,7 @@ Service construction patterns verified against Pipecat 1.2.1:
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Literal
 
 from loguru import logger
@@ -58,6 +59,7 @@ from app.runtime import (
     append_session_transcript_event,
     append_session_turn_metrics,
     build_config_snapshot,
+    update_session_metric,
     update_session_conversation_state,
     update_session_first_latency,
 )
@@ -526,7 +528,7 @@ async def run_pipeline(
     settings: Settings,
     prepared_greeting_text: str | None = None,
     opening_mode: Literal["outbound", "default"] = "default",
-    greeting_start_delay_ms: int = 100,
+    greeting_start_delay_ms: int = 0,
 ) -> PipelineExecutionResult:
     """Assemble and run the Pipecat pipeline for one call.
 
@@ -616,7 +618,7 @@ async def run_pipeline(
     async def _on_first_bot_speech(observer: Any, latency_seconds: float) -> None:
         """Capture time from client connection to first bot speech."""
         log.info("First bot speech latency", latency_secs=f"{latency_seconds:.3f}")
-        update_session_first_latency(call_sid, latency_seconds)
+        update_session_first_latency(call_sid, latency_seconds, observed_at=time.time())
 
     # --- Transport disconnect callback ---
     # Disconnect during active pipeline surfaces through this transport lifecycle
@@ -643,6 +645,7 @@ async def run_pipeline(
             call_sid=call_sid,
             greeting_text=cleaned_greeting,
         )
+        update_session_metric(call_sid, "first_tts_frame_queued_at", time.time())
         await task.queue_frame(TTSSpeakFrame(cleaned_greeting, append_to_context=True))
     else:
         cleaned_greeting = _normalize_transcript_text(snapshot["INITIAL_GREETING_FALLBACK_TEXT"])
@@ -650,6 +653,7 @@ async def run_pipeline(
             call_sid=call_sid,
             greeting_text=cleaned_greeting,
         )
+        update_session_metric(call_sid, "first_tts_frame_queued_at", time.time())
         await task.queue_frame(TTSSpeakFrame(cleaned_greeting, append_to_context=True))
 
     # --- Runner execution ---

@@ -1224,10 +1224,13 @@
     </div>
     <div>
         {% if log.completed and not log.error %}
-        <span class="session-badge badge-completed">Completed</span>
+        <span class="session-badge badge-completed">Transport: Completed</span>
         {% else %}
-        <span class="session-badge badge-failed">Failed</span>
+        <span class="session-badge badge-failed">Transport: Failed</span>
         {% endif %}
+        <span class="session-badge {% if log.conversation_outcome == 'completed' %}badge-completed{% else %}badge-failed{% endif %}">
+            Outcome: {{ log.conversation_outcome | default('unknown', true) | replace('_', ' ') | title }}
+        </span>
     </div>
 </div>
 
@@ -1252,6 +1255,21 @@
     <div class="metric-card">
         <div class="metric-lbl">Total Turns</div>
         <div class="metric-val">{{ log.metrics.turn_count }}</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-lbl">Greeting Source</div>
+        <div class="metric-val">{{ log.metrics.greeting_text_source | default('N/A', true) }}</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-lbl">Greeting LLM Total</div>
+        <div class="metric-val">
+            {% set greeting_llm_total_latency = log.metrics.greeting_llm_total_latency | default(none) %}
+            {% if greeting_llm_total_latency is not none %}
+            {{ "%.3f"|format(greeting_llm_total_latency) }}s
+            {% else %}
+            N/A
+            {% endif %}
+        </div>
     </div>
     <div class="metric-card">
         <div class="metric-lbl">Avg Turn Latency</div>
@@ -1300,6 +1318,35 @@
     </tr>
 </table>
 {% endif %}
+
+<table class="config-table">
+    <tr>
+        <td>Call Transport Status</td>
+        <td>{{ log.call_transport_status | default('unknown', true) }}</td>
+    </tr>
+    <tr>
+        <td>Conversation Outcome</td>
+        <td>{{ log.conversation_outcome | default('unknown', true) }}</td>
+    </tr>
+    <tr>
+        <td>Final Conversation Phase</td>
+        <td>{{ log.final_conversation_phase | default('unknown', true) }}</td>
+    </tr>
+    <tr>
+        <td>Slots Collected</td>
+        <td>{{ log.slots_collected_count | default(0, true) }}</td>
+    </tr>
+    <tr>
+        <td>Required Slots Missing</td>
+        <td>
+            {% if log.required_slots_missing %}
+            {{ log.required_slots_missing | join(', ') }}
+            {% else %}
+            None
+            {% endif %}
+        </td>
+    </tr>
+</table>
 
 {% if log.conversation_state %}
 <table class="config-table">

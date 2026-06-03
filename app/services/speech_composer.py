@@ -150,6 +150,14 @@ class SpeechComposer:
                 default_text="No problem, we can stop here. Thank you.",
             )
 
+        if action.reason == "readiness_max_attempts":
+            return _safe_policy_text(
+                text="Sorry, I am having trouble confirming readiness. We can stop here for now.",
+                state=state,
+                flow_definition=flow_definition,
+                default_text=DEFAULT_STOP_TEXT,
+            )
+
         if action.reason in {"no_askable_slots", "guard_no_valid_slot"}:
             return _safe_policy_text(
                 text=_closing_node_text(flow_definition),
@@ -175,6 +183,13 @@ class SpeechComposer:
         use_reprompt: bool,
     ) -> str:
         if slot_id is None:
+            if state.phase == "readiness":
+                return _safe_policy_text(
+                    text=DEFAULT_READINESS_TEXT,
+                    state=state,
+                    flow_definition=flow_definition,
+                    default_text="Should I continue, or would you prefer to stop here?",
+                )
             return _safe_policy_text(
                 text=fallback_policy.clarification_text,
                 state=state,

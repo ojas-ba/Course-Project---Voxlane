@@ -42,7 +42,7 @@ class Settings(BaseSettings):
         alias="OUTBOUND_GREETING_PREP_TIMEOUT_SECS",
     )
     outbound_greeting_start_delay_ms: int = Field(
-        default=100,
+        default=0,
         alias="OUTBOUND_GREETING_START_DELAY_MS",
     )
     pending_outbound_ttl_secs: float = Field(

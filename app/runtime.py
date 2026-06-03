@@ -7,7 +7,8 @@ import time
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
 from app.config import Settings
-from app.services.config_repository import get_bot_profile_snapshot
+from app.models.runtime_config_models import RuntimeConfig
+from app.services.runtime_config import build_effective_snapshot, get_cached_runtime_config
 
 
 class ConfigSnapshot(TypedDict):
@@ -77,12 +78,16 @@ def build_config_snapshot(
     settings: Settings,
     profile_id: str | None = None,
 ) -> ConfigSnapshot:
-    """Create the legacy-compatible immutable config snapshot for a call."""
+    """Create the immutable per-call config snapshot from the runtime config.
 
-    return cast(
-        ConfigSnapshot,
-        get_bot_profile_snapshot(settings, profile_id=profile_id),
-    )
+    Uses the process-cached global runtime config when available (populated at
+    startup / on save); falls back to the canonical default config only when no
+    cache exists yet (e.g. unit tests without Mongo). ``profile_id`` is accepted
+    for signature compatibility but ignored — V3 has a single global config.
+    """
+
+    config = get_cached_runtime_config() or RuntimeConfig.default(settings)
+    return cast(ConfigSnapshot, build_effective_snapshot(config))
 
 
 def create_session(

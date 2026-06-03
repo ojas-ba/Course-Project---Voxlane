@@ -1,0 +1,89 @@
+"""Typed models for the single global V3 runtime configuration.
+
+There is exactly one runtime config document (``_id="global"``) in MongoDB.
+Only secrets/infra live in ``.env``; all tuning/behavior lives here and is
+editable from the frontend. These models are mutable (editable) by design,
+unlike the frozen V2 profile models.
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from app.config import Settings
+
+GLOBAL_CONFIG_ID = "global"
+
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a low-latency multilingual voice assistant. Keep replies natural, "
+    "concise, and useful. Reply in the same language as the user unless they "
+    "explicitly ask otherwise."
+)
+DEFAULT_GREETING_PROMPT = (
+    "Generate a short, warm English opening greeting for a phone call. The "
+    "assistant should introduce itself briefly and invite the user to speak. "
+    "Keep it under one sentence."
+)
+
+
+class STTCfg(BaseModel):
+    model: str = "flux-general-multi"
+    language_hints: list[str] = Field(default_factory=lambda: ["en", "hi"])
+    eot_threshold: float = 0.65
+    eot_timeout_ms: int = 700
+
+
+class LLMCfg(BaseModel):
+    provider: Literal["cerebras"] = "cerebras"
+    model: str = "gpt-oss-120b"
+    temperature: float = 0.7
+    max_tokens: int = 160
+    request_timeout_seconds: float = 10.0
+
+
+class TTSCfg(BaseModel):
+    provider: Literal["cartesia"] = "cartesia"
+    model: str = "sonic-3.5"
+    voice_id: str = ""
+    language_mode: Literal["per_turn", "fixed"] = "per_turn"
+
+
+class PromptCfg(BaseModel):
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    greeting_prompt: str = DEFAULT_GREETING_PROMPT
+
+
+class MemoryCfg(BaseModel):
+    recent_turn_pairs: int = 6
+    enable_running_summary_after_turn: int = 10
+    summary_update_every_turns: int = 5
+    max_summary_tokens: int = 250
+    max_pinned_facts: int = 12
+    max_recall_snippets: int = 2
+    recall_only_when_user_asks: bool = True
+
+
+class OpsCfg(BaseModel):
+    debug_log_level: str = "INFO"
+
+
+class RuntimeConfig(BaseModel):
+    """The single global runtime config document."""
+
+    version: int = 1
+    stt: STTCfg = Field(default_factory=STTCfg)
+    llm: LLMCfg = Field(default_factory=LLMCfg)
+    tts: TTSCfg = Field(default_factory=TTSCfg)
+    prompt: PromptCfg = Field(default_factory=PromptCfg)
+    memory: MemoryCfg = Field(default_factory=MemoryCfg)
+    ops: OpsCfg = Field(default_factory=OpsCfg)
+
+    @classmethod
+    def default(cls, settings: Settings) -> "RuntimeConfig":
+        """Build the default config, seeding the TTS voice from env (Phase 1)."""
+
+        return cls(
+            tts=TTSCfg(voice_id=settings.tts_voice_id, model=settings.tts_model),
+        )

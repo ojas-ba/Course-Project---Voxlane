@@ -118,33 +118,20 @@ def _is_valid_assistant_text(text: str) -> bool:
         return False
     if _has_simulated_speaker(cleaned):
         return False
-    if _question_count(cleaned) > 1:
-        return False
     return True
 
 
 def validate_greeting_text(text: str) -> str:
-    """Validate a generated greeting and return normalized spoken text."""
+    """Validate a generated greeting and return normalized spoken text.
+
+    V3: no readiness/consent gate. The greeting only needs to be a clean,
+    non-empty, single spoken line. Invalid output raises ValueError, which the
+    outbound flow treats as a hard failure (the call is NOT placed).
+    """
 
     cleaned = _normalize_text(text)
-    lowered = cleaned.lower()
-    invalid_phrases = (
-        "go ahead",
-        "works for me",
-        "this works for me",
-        "yes,",
-        "yeah,",
-        "i am ready",
-        "i'm ready",
-    )
-    readiness_cues = ("good time", "available", "ready", "continue", "speak", "talk")
-
     if not _is_valid_assistant_text(cleaned):
         raise ValueError("generated greeting failed voice safety validation")
-    if any(phrase in lowered for phrase in invalid_phrases):
-        raise ValueError(f"generated greeting sounded like callee consent: {cleaned}")
-    if "?" not in lowered and not any(cue in lowered for cue in readiness_cues):
-        raise ValueError(f"generated greeting did not ask readiness: {cleaned}")
     return cleaned
 
 
@@ -154,18 +141,20 @@ async def generate_outbound_greeting_text(
     settings: Settings,
     to_number: str | None = None,
 ) -> str:
-    """Generate and validate the personalized outbound greeting before dialing."""
+    """Generate and validate the LLM opening greeting before dialing.
+
+    Raises on empty/invalid output or any provider error. The caller must not
+    place the call when this raises — there is no static/canned fallback.
+    """
 
     system_prompt = (
-        "You generate only the assistant's opening greeting for an outbound voice call. "
-        "Do not answer as the callee. Do not begin the task. "
-        "Ask whether the person is available or ready to continue. "
-        "Return only the words the assistant should speak."
+        "You generate ONLY the assistant's spoken opening greeting for an "
+        "outbound voice call. Return only the words the assistant should speak "
+        "— no labels, no quotes, no stage directions."
     )
     user_prompt = (
-        f"Scenario instructions:\n{snapshot['SYSTEM_PROMPT']}\n\n"
-        f"Greeting instructions:\n{snapshot['INITIAL_GREETING_INSTRUCTIONS']}\n\n"
-        f"Fallback greeting style:\n{snapshot['INITIAL_GREETING_FALLBACK_TEXT']}\n\n"
+        f"Assistant persona:\n{snapshot['SYSTEM_PROMPT']}\n\n"
+        f"Greeting instructions:\n{snapshot['GREETING_PROMPT']}\n\n"
         f"Destination number, if useful: {to_number or 'unknown'}"
     )
     raw = await _run_llm_text_generation(

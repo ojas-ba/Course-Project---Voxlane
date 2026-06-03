@@ -1,0 +1,114 @@
+{% if part == 'outbound_status' %}
+<div class="status {{ 'ok' if success else 'err' }}">
+  {% if success %}
+    <strong>Call placed.</strong> CallSid: <code>{{ call_sid }}</code> → {{ to_number }}
+    {% if greeting_text %}<div class="greeting">Greeting: “{{ greeting_text }}”</div>{% endif %}
+  {% else %}
+    <strong>Call not placed.</strong> {{ error }}
+  {% endif %}
+</div>
+{% elif part == 'logs_list' %}
+<table class="calls">
+  <thead><tr><th>Call</th><th>Status</th><th>Turns</th><th>Created</th></tr></thead>
+  <tbody>
+  {% for log in logs %}
+    <tr>
+      <td><code>{{ log.call_sid }}</code></td>
+      <td>{{ log.get('conversation_outcome', log.get('status', '—')) }}</td>
+      <td>{{ log.get('metrics', {}).get('turn_count', 0) }}</td>
+      <td>{{ log.created_at }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4">{% if db_connected %}No calls yet.{% else %}Database not connected.{% endif %}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voice Agent — Runtime Config</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background:#0f1115; color:#e6e6e6; }
+    .wrap { max-width: 860px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 1.4rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; color:#9ad; }
+    fieldset { border:1px solid #2a2f3a; border-radius:8px; margin:0 0 1rem; padding:1rem; }
+    label { display:block; font-size:.8rem; color:#9aa4b2; margin:.5rem 0 .2rem; }
+    input, select, textarea { width:100%; box-sizing:border-box; background:#161a22; color:#e6e6e6;
+      border:1px solid #2a2f3a; border-radius:6px; padding:.5rem; font-size:.9rem; }
+    textarea { min-height:60px; }
+    .row { display:flex; gap:1rem; } .row > div { flex:1; }
+    button { background:#2563eb; color:#fff; border:0; border-radius:6px; padding:.6rem 1rem;
+      font-size:.9rem; cursor:pointer; } button.secondary { background:#374151; }
+    .status { padding:.7rem 1rem; border-radius:6px; margin-top:.5rem; }
+    .status.ok { background:#0f3a23; color:#9ff5c4; } .status.err { background:#3a1212; color:#ffb4b4; }
+    .greeting { margin-top:.4rem; font-style:italic; color:#cfe; }
+    .saved { color:#9ff5c4; font-size:.85rem; } .topnav a { color:#9ad; margin-right:1rem; }
+    table.calls { width:100%; border-collapse:collapse; } table.calls th, table.calls td {
+      text-align:left; padding:.4rem .6rem; border-bottom:1px solid #2a2f3a; font-size:.85rem; }
+    code { color:#ffd; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topnav"><a href="/config">Config</a><a href="/calls">Calls</a></div>
+  <h1>Runtime Configuration</h1>
+  {% if saved %}<p class="saved">✓ Saved.</p>{% endif %}
+  {% if error %}<div class="status err">{{ error }}</div>{% endif %}
+
+  <form method="post" action="/config">
+    <fieldset><h2>STT (Deepgram Flux)</h2>
+      <label>Model</label><input name="stt_model" value="{{ config.stt.model }}" />
+      <div class="row">
+        <div><label>Language hints (comma)</label><input name="stt_language_hints" value="{{ config.stt.language_hints | join(', ') }}" /></div>
+        <div><label>EOT threshold</label><input name="stt_eot_threshold" value="{{ config.stt.eot_threshold }}" /></div>
+        <div><label>EOT timeout (ms)</label><input name="stt_eot_timeout_ms" value="{{ config.stt.eot_timeout_ms }}" /></div>
+      </div>
+    </fieldset>
+    <fieldset><h2>LLM (Cerebras)</h2>
+      <div class="row">
+        <div><label>Model</label><input name="llm_model" value="{{ config.llm.model }}" /></div>
+        <div><label>Temperature</label><input name="llm_temperature" value="{{ config.llm.temperature }}" /></div>
+      </div>
+      <div class="row">
+        <div><label>Max tokens</label><input name="llm_max_tokens" value="{{ config.llm.max_tokens }}" /></div>
+        <div><label>Request timeout (s)</label><input name="llm_request_timeout_seconds" value="{{ config.llm.request_timeout_seconds }}" /></div>
+      </div>
+    </fieldset>
+    <fieldset><h2>TTS (Cartesia)</h2>
+      <div class="row">
+        <div><label>Model</label><input name="tts_model" value="{{ config.tts.model }}" /></div>
+        <div><label>Voice ID</label><input name="tts_voice_id" value="{{ config.tts.voice_id }}" /></div>
+        <div><label>Language mode</label>
+          <select name="tts_language_mode">
+            <option value="per_turn" {{ 'selected' if config.tts.language_mode == 'per_turn' }}>per_turn</option>
+            <option value="fixed" {{ 'selected' if config.tts.language_mode == 'fixed' }}>fixed</option>
+          </select>
+        </div>
+      </div>
+    </fieldset>
+    <fieldset><h2>Prompts</h2>
+      <label>System prompt</label><textarea name="system_prompt">{{ config.prompt.system_prompt }}</textarea>
+      <label>Greeting prompt</label><textarea name="greeting_prompt">{{ config.prompt.greeting_prompt }}</textarea>
+    </fieldset>
+    <fieldset><h2>Ops</h2>
+      <label>Debug log level</label><input name="debug_log_level" value="{{ config.ops.debug_log_level }}" />
+    </fieldset>
+    <button type="submit">Save config</button>
+  </form>
+
+  <h1 style="margin-top:2rem;">Place outbound call</h1>
+  <form hx-post="/telephony/outbound" hx-target="#outbound-status" hx-swap="innerHTML">
+    <label>Phone number (E.164)</label>
+    <input name="to_number" placeholder="+919876543210" />
+    <p style="font-size:.8rem;color:#9aa4b2;">The LLM greeting is generated first; the call is not placed if it fails.</p>
+    <button type="submit">Generate greeting &amp; call</button>
+  </form>
+  <div id="outbound-status"></div>
+</div>
+</body>
+</html>
+{% endif %}

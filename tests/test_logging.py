@@ -237,7 +237,7 @@ def test_finalize_call_log_skips_incomplete_turns():
     assert call_log.error == "User disconnected"
 
 
-def test_finalize_call_log_accepts_expanded_v2_snapshot():
+def test_finalize_call_log_accepts_v3_snapshot():
     snapshot = build_config_snapshot(get_settings())
 
     call_log = finalize_call_log(
@@ -250,8 +250,8 @@ def test_finalize_call_log_accepts_expanded_v2_snapshot():
         error=None,
     )
 
-    assert call_log.config_snapshot["snapshot_version"] == "v2_phase1"
-    assert call_log.config_snapshot["bot_profile"]["id"] == "default_demo_bot"
+    assert call_log.config_snapshot["snapshot_version"] == "v3"
+    assert call_log.config_snapshot["runtime_config"]["llm"]["provider"] == "cerebras"
 
 
 def test_finalize_call_log_separates_transport_completed_from_readiness_failed():

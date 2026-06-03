@@ -12,6 +12,7 @@ from app.logging_config import setup_logging
 from app.routers.dashboard import router as dashboard_router
 from app.routers.telephony import router as telephony_router
 from app.services.exotel_client import ExotelOutboundClient
+from app.services.runtime_config import seed_runtime_config_if_missing
 
 
 @asynccontextmanager
@@ -21,15 +22,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Initialize logging first so all subsequent startup logs are structured
     setup_logging()
 
-    # Initialize database client
+    # Initialize database client. MongoDB is REQUIRED in V3 — fail clearly if
+    # it is unavailable rather than serving calls with no runtime config.
     settings = get_settings()
+    await init_database(settings)
+
+    # Seed/load the single global runtime config into the process cache.
     try:
-        await init_database(settings)
-    except Exception as exc:
-        logger.warning(
-            "MongoDB unavailable at startup; continuing without persistence: {err}",
-            err=str(exc),
-        )
+        await seed_runtime_config_if_missing(settings)
+    except Exception:
+        logger.exception("Failed to seed/load runtime config at startup")
 
     # Initialize Exotel outbound client (optional — server starts without it)
     try:

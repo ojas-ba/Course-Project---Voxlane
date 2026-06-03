@@ -23,12 +23,16 @@ class Settings(BaseSettings):
     deepgram_api_key: str = Field(alias="DEEPGRAM_API_KEY")
     cerebras_api_key: str = Field(alias="CEREBRAS_API_KEY")
     cartesia_api_key: str = Field(alias="CARTESIA_API_KEY")
-    system_prompt: str = Field(alias="SYSTEM_PROMPT")
-    llm_model: str = Field(alias="LLM_MODEL")
-    llm_temperature: float = Field(alias="LLM_TEMPERATURE")
-    tts_voice_id: str = Field(alias="TTS_VOICE_ID")
-    tts_model: str = Field(alias="TTS_MODEL")
-    initial_greeting_prompt: str = Field(alias="INITIAL_GREETING_PROMPT")
+    # --- V3: behavior/tuning lives in the Mongo runtime_config, not .env. ---
+    # tts_voice_id / tts_model remain here only as the Phase 1 seed for the
+    # default runtime config; the rest are deprecated optional shims kept so
+    # legacy code paths and tests still construct Settings without these vars.
+    tts_voice_id: str = Field(default="", alias="TTS_VOICE_ID")
+    tts_model: str = Field(default="sonic-3.5", alias="TTS_MODEL")
+    system_prompt: str = Field(default="", alias="SYSTEM_PROMPT")
+    llm_model: str = Field(default="gpt-oss-120b", alias="LLM_MODEL")
+    llm_temperature: float = Field(default=0.7, alias="LLM_TEMPERATURE")
+    initial_greeting_prompt: str = Field(default="", alias="INITIAL_GREETING_PROMPT")
     initial_greeting_instructions: str = Field(
         default="",
         alias="INITIAL_GREETING_INSTRUCTIONS",

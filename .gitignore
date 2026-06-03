@@ -18,6 +18,7 @@ env/
 htmlcov/
 
 logs/
+scratch/
 
 dist/
 build/

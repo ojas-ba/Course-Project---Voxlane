@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Call {{ log.call_sid }}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background:#0f1115; color:#e6e6e6; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 1.2rem; } h2 { font-size: 1rem; color:#9ad; margin-top:1.5rem; }
+    .topnav a { color:#9ad; margin-right:1rem; }
+    .cards { display:flex; gap:1rem; flex-wrap:wrap; margin:1rem 0; }
+    .card { background:#161a22; border:1px solid #2a2f3a; border-radius:8px; padding:.7rem 1rem; min-width:140px; }
+    .card .lbl { font-size:.72rem; color:#9aa4b2; } .card .val { font-size:1.1rem; }
+    table { width:100%; border-collapse:collapse; font-size:.82rem; }
+    th, td { text-align:left; padding:.4rem .5rem; border-bottom:1px solid #2a2f3a; vertical-align:top; }
+    code { color:#ffd; } pre { white-space:pre-wrap; background:#161a22; border:1px solid #2a2f3a; border-radius:6px; padding:.6rem; font-size:.78rem; }
+    .err { color:#ffb4b4; } .muted { color:#9aa4b2; font-size:.8rem; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topnav"><a href="/config">Config</a><a href="/calls">Calls</a></div>
+  <h1>Call <code>{{ log.call_sid }}</code></h1>
+  <div class="muted">{{ log.created_at }} · stream <code>{{ log.stream_sid }}</code>
+    {% if log.get('error') %}· <span class="err">error: {{ log.error }}</span>{% endif %}</div>
+
+  <div class="cards">
+    <div class="card"><div class="lbl">Turns</div><div class="val">{{ turn_records | length }}</div></div>
+    <div class="card"><div class="lbl">Avg User Stop → First Audio</div>
+      <div class="val">{{ ('%.0f ms' % avg_latency) if avg_latency is not none else '—' }}</div></div>
+    <div class="card"><div class="lbl">Max User Stop → First Audio</div>
+      <div class="val">{{ ('%.0f ms' % max_latency) if max_latency is not none else '—' }}</div></div>
+    <div class="card"><div class="lbl">Greeting source</div>
+      <div class="val">{{ log.get('metrics', {}).get('greeting_text_source', '—') }}</div></div>
+  </div>
+  <p class="muted">“User Stop → First Audio Sent” is a server-side proxy (BotStartedSpeakingFrame); it is not the phone-speaker playback time.</p>
+
+  <h2>Greeting</h2>
+  <pre>{% for ev in log.get('transcript', []) %}{% if ev.phase == 'greeting' %}{{ ev.text }}{% endif %}{% endfor %}</pre>
+
+  <h2>Turns</h2>
+  <table>
+    <thead><tr>
+      <th>#</th><th>User said</th><th>Bot said</th><th>Det</th><th>Resp</th>
+      <th>User Stop→First Audio</th><th>EOT</th><th>LLM TTFB</th><th>LLM total</th><th>TTS first</th><th>Error</th>
+    </tr></thead>
+    <tbody>
+    {% for r in turn_records %}
+      <tr>
+        <td>{{ r.turn_id }}</td>
+        <td>{{ r.user_text }}</td>
+        <td>{{ r.assistant_text }}</td>
+        <td>{{ r.detected_language or '—' }}</td>
+        <td>{{ r.response_language or '—' }}</td>
+        <td>{{ ('%.0f ms' % r.primary_latency_ms) if r.primary_latency_ms is not none else '—' }}</td>
+        <td>{{ ('%.0f' % r.eot_delay_ms) if r.eot_delay_ms is not none else '—' }}</td>
+        <td>{{ ('%.0f' % r.llm_ttfb_ms) if r.llm_ttfb_ms is not none else '—' }}</td>
+        <td>{{ ('%.0f' % r.llm_total_ms) if r.llm_total_ms is not none else '—' }}</td>
+        <td>{{ ('%.0f' % r.tts_first_audio_ms) if r.tts_first_audio_ms is not none else '—' }}</td>
+        <td class="err">{{ (r.error_stage ~ ': ' ~ r.error_message) if r.error_stage else '' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="11" class="muted">No turn records.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Effective config snapshot</h2>
+  <pre>{{ log.get('config_snapshot', {}).get('runtime_config', {}) | tojson(indent=2) }}</pre>
+</div>
+</body>
+</html>

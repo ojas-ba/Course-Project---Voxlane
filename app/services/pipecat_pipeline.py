@@ -63,11 +63,15 @@ from app.runtime import (
     append_session_transcript_event,
     append_turn_record,
     get_session_language_state,
+    get_session_memory,
+    get_session_transcript,
     set_session_language_state,
+    set_session_memory,
     update_session_metric,
     update_session_first_latency,
 )
 from app.services import language as lang
+from app.services import memory as mem
 from app.services.call_metrics import TurnMetricsObserver
 from app.services.turn_collector import TurnCollector, utc_now
 
@@ -202,6 +206,75 @@ class LanguageProcessor(FrameProcessor):
                 )
 
 
+class MemoryProcessor(FrameProcessor):
+    """Govern the LLM context for bounded in-call memory.
+
+    On each finalized user turn (before the user aggregator appends the message)
+    it rebuilds the system message from the per-call memory (language
+    instruction + pinned facts + running summary + optional recall snippets) and
+    trims history to the most recent N turn pairs. The current user message is
+    appended by the downstream aggregator; the running summary is refreshed
+    post-turn (never here), so this stays cheap and non-blocking.
+    """
+
+    def __init__(
+        self,
+        *,
+        call_sid: str,
+        context: LLMContext,
+        base_system_prompt: str,
+        memory_cfg: dict[str, Any],
+    ) -> None:
+        super().__init__()
+        self._call_sid = call_sid
+        self._context = context
+        self._base_system = base_system_prompt
+        self._cfg = memory_cfg
+
+    async def process_frame(
+        self, frame: Any, direction: FrameDirection = FrameDirection.DOWNSTREAM
+    ) -> None:
+        await super().process_frame(frame, direction)
+        if (
+            direction == FrameDirection.DOWNSTREAM
+            and isinstance(frame, TranscriptionFrame)
+            and getattr(frame, "finalized", False)
+        ):
+            self._govern_context(frame.text or "")
+        await self.push_frame(frame, direction)
+
+    def _govern_context(self, user_text: str) -> None:
+        memory = get_session_memory(self._call_sid) or mem.new_call_memory()
+        memory["pinned_facts"] = mem.extract_pinned_facts(
+            user_text, memory.get("pinned_facts", []),
+            max_pinned=int(self._cfg.get("max_pinned_facts", 12)),
+        )
+        set_session_memory(self._call_sid, memory)
+
+        lstate = get_session_language_state(self._call_sid) or lang.new_language_state()
+        instruction = lang.language_instruction(lstate.get("response_language", "en"))
+
+        recall: list[str] = []
+        if self._cfg.get("recall_only_when_user_asks", True) and mem.recall_triggered(user_text):
+            recall = mem.select_recall_snippets(
+                get_session_transcript(self._call_sid),
+                max_snippets=int(self._cfg.get("max_recall_snippets", 2)),
+            )
+
+        system_block = mem.build_system_block(
+            self._base_system,
+            language_instruction=instruction,
+            pinned_facts=memory["pinned_facts"],
+            running_summary=memory.get("running_summary"),
+            recall_snippets=recall,
+        )
+        trimmed = mem.trim_recent_messages(
+            self._context.messages,
+            recent_turn_pairs=int(self._cfg.get("recent_turn_pairs", 6)),
+        )
+        self._context.set_messages([{"role": "system", "content": system_block}] + trimmed)
+
+
 def _record_greeting(*, call_sid: str, greeting_text: str) -> None:
     append_session_transcript_event(
         call_sid, role="assistant", phase="greeting", text=greeting_text
@@ -225,6 +298,12 @@ def _build_pipeline_processors(
     context = _build_context(snapshot)
     aggregator_pair = _build_aggregator_pair(context)
     language_processor = LanguageProcessor(call_sid=call_sid)
+    memory_processor = MemoryProcessor(
+        call_sid=call_sid,
+        context=context,
+        base_system_prompt=snapshot["SYSTEM_PROMPT"],
+        memory_cfg=(snapshot.get("runtime_config") or {}).get("memory") or {},
+    )
     turn_collector = TurnCollector(call_sid=call_sid, stream_sid=stream_sid)
 
     if hasattr(stt, "event_handler"):
@@ -259,6 +338,7 @@ def _build_pipeline_processors(
         transport.input(),
         stt,
         language_processor,
+        memory_processor,
         aggregator_pair.user(),
         llm,
         tts,
@@ -294,6 +374,7 @@ async def run_pipeline(
     """
 
     log = logger.bind(call_sid=call_sid)
+    memory_cfg = (snapshot.get("runtime_config") or {}).get("memory") or {}
 
     def _on_turn_record(record: dict[str, Any]) -> None:
         append_turn_record(call_sid, record)
@@ -303,6 +384,15 @@ async def run_pipeline(
                 call_sid, role="assistant", phase="task",
                 text=_normalize_transcript_text(assistant_text),
             )
+        # Post-turn (never before the reply): refresh the running summary if due.
+        memory = get_session_memory(call_sid) or mem.new_call_memory()
+        mem.update_summary_if_due(
+            memory,
+            turn_count=int(record.get("turn_id") or 0),
+            transcript=get_session_transcript(call_sid),
+            memory_cfg=memory_cfg,
+        )
+        set_session_memory(call_sid, memory)
 
     metrics_observer = TurnMetricsObserver(on_record=_on_turn_record)
 

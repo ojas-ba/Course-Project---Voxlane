@@ -267,12 +267,55 @@ async def post_outbound(request: Request) -> HTMLResponse:
 # --- Call logs (list/detail enhanced in Batch 3) ---------------------------
 
 
+def _latency_stats(turn_records: list[dict[str, Any]]) -> tuple[float | None, float | None]:
+    vals = [
+        r.get("primary_latency_ms")
+        for r in turn_records
+        if isinstance(r.get("primary_latency_ms"), (int, float))
+    ]
+    if not vals:
+        return None, None
+    return round(sum(vals) / len(vals), 1), max(vals)
+
+
 @router.get("/calls", response_class=HTMLResponse)
 async def get_calls_list(request: Request) -> HTMLResponse:
-    """Render the completed-calls list."""
+    """Render the completed-calls list with per-call latency stats."""
     logs, db_connected = await _fetch_recent_logs()
+    for log in logs:
+        records = log.get("metrics", {}).get("turn_records", [])
+        log["avg_latency_ms"], log["max_latency_ms"] = _latency_stats(records)
+        log["turn_count"] = log.get("metrics", {}).get("turn_count", len(records))
     return templates.TemplateResponse(
         request=request,
         name="config.html",
         context={"part": "logs_list", "logs": logs, "db_connected": db_connected},
+    )
+
+
+@router.get("/calls/{call_sid}", response_class=HTMLResponse)
+async def get_call_detail(request: Request, call_sid: str) -> HTMLResponse:
+    """Render the detail page for one completed call."""
+    try:
+        db = get_database()
+        log = await db["call_logs"].find_one({"call_sid": call_sid})
+    except Exception as exc:
+        logger.warning("Call detail query failed: {err}", err=exc)
+        log = None
+    if not log:
+        return HTMLResponse("<p class='status err'>Call log not found.</p>", status_code=200)
+
+    if isinstance(log.get("_id"), ObjectId):
+        log["created_at"] = log["_id"].generation_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+    records = log.get("metrics", {}).get("turn_records", [])
+    avg_latency, max_latency = _latency_stats(records)
+    return templates.TemplateResponse(
+        request=request,
+        name="call_detail.html",
+        context={
+            "log": log,
+            "turn_records": records,
+            "avg_latency": avg_latency,
+            "max_latency": max_latency,
+        },
     )

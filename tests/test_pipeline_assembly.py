@@ -8,6 +8,7 @@ from app.runtime import build_config_snapshot
 from app.services.call_metrics import TurnMetricsObserver
 from app.services.pipecat_pipeline import (
     LanguageProcessor,
+    MemoryProcessor,
     _build_llm,
     _build_pipeline_processors,
     _build_stt,
@@ -42,11 +43,12 @@ def test_pipeline_order_has_llm_between_user_and_tts():
         stream_sid="s1",
         metrics_observer=obs,
     )
-    assert len(procs) == 8
+    # input, stt, language, memory, user(), llm, tts, output(), assistant()
+    assert len(procs) == 9
     assert isinstance(procs[1], DeepgramFluxSTTService)   # stt
     assert isinstance(procs[2], LanguageProcessor)        # language
-    assert isinstance(procs[4], CerebrasLLMService)       # llm (after user aggregator at [3])
-    # user aggregator [3] and assistant aggregator [7] are distinct instances,
-    # with the LLM and TTS between them and transport.output() at [6].
-    assert procs[3] is not procs[7]
-    assert procs[6] is transport.output.return_value
+    assert isinstance(procs[3], MemoryProcessor)          # memory (before user())
+    assert isinstance(procs[5], CerebrasLLMService)       # llm (after user aggregator at [4])
+    # user aggregator [4] and assistant aggregator [8] are distinct instances.
+    assert procs[4] is not procs[8]
+    assert procs[7] is transport.output.return_value

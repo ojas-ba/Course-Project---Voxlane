@@ -288,6 +288,29 @@ def set_session_language_state(call_sid: str, state: dict[str, Any]) -> None:
     session["language_state"] = json.loads(json.dumps(state))
 
 
+def get_session_memory(call_sid: str) -> dict[str, Any] | None:
+    """Return the per-call bounded-memory state, if the session exists."""
+
+    session = ACTIVE_SESSIONS.get(call_sid)
+    return session.get("memory") if session is not None else None
+
+
+def set_session_memory(call_sid: str, memory: dict[str, Any]) -> None:
+    """Store a JSON-safe per-call bounded-memory state."""
+
+    session = ACTIVE_SESSIONS.get(call_sid)
+    if session is None:
+        return
+    session["memory"] = json.loads(json.dumps(memory))
+
+
+def get_session_transcript(call_sid: str) -> list[dict[str, Any]]:
+    """Return the chronological transcript events for an active session."""
+
+    session = ACTIVE_SESSIONS.get(call_sid)
+    return list(session["transcript"]) if session is not None else []
+
+
 def append_turn_record(call_sid: str, record: dict[str, Any]) -> None:
     """Append one finalized per-turn metrics record to the session."""
 

@@ -72,3 +72,38 @@ def test_calls_list_renders(client):
         response = client.get("/calls")
     assert response.status_code == 200
     assert "No calls yet." in response.text
+
+
+def test_call_detail_renders_turn_table(client):
+    fake_log = {
+        "_id": "x",
+        "call_sid": "call_abc",
+        "stream_sid": "stream_abc",
+        "config_snapshot": {"runtime_config": {"llm": {"model": "gpt-oss-120b"}}},
+        "transcript": [{"role": "assistant", "phase": "greeting", "text": "Hi there!"}],
+        "metrics": {
+            "greeting_text_source": "llm",
+            "turn_records": [
+                {
+                    "turn_id": 1, "user_text": "hello", "assistant_text": "hi",
+                    "detected_language": "en", "response_language": "en",
+                    "primary_latency_ms": 850.0, "eot_delay_ms": 300.0,
+                    "llm_ttfb_ms": 200.0, "llm_total_ms": 400.0, "tts_first_audio_ms": 120.0,
+                    "error_stage": None, "error_message": None,
+                }
+            ],
+        },
+    }
+
+    async def _find_one(query):
+        return fake_log
+
+    fake_collection = {"call_logs": type("C", (), {"find_one": staticmethod(_find_one)})()}
+    with patch("app.routers.dashboard.get_database", return_value=fake_collection):
+        response = client.get("/calls/call_abc")
+
+    assert response.status_code == 200
+    assert "call_abc" in response.text
+    assert "Hi there!" in response.text
+    assert "hello" in response.text
+    assert "850 ms" in response.text

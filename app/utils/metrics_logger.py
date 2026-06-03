@@ -319,6 +319,7 @@ def finalize_call_log(
         greeting_text_source=metrics.get("greeting_text_source"),
         turn_count=metrics.get("turn_count", 0),
         turns=metrics.get("turns", []),
+        turn_records=metrics.get("turn_records", []),
     )
     conversation_summary = _conversation_summary(
         config_snapshot=config_snapshot,

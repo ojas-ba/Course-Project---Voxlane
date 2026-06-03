@@ -90,6 +90,8 @@ class CallMetrics(BaseModel):
     greeting_text_source: str | None = None
     turn_count: int = 0
     turns: list[TurnMetrics] = Field(default_factory=list)
+    # V3 per-turn records: "User Stop -> First Audio Sent" + stage timestamps.
+    turn_records: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CallLog(BaseModel):

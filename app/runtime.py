@@ -272,6 +272,33 @@ def update_pending_opening_state(call_sid: str, opening_state: OpeningState) -> 
         context["opening_state"] = opening_state
 
 
+def get_session_language_state(call_sid: str) -> dict[str, Any] | None:
+    """Return the per-call language state, if the session exists."""
+
+    session = ACTIVE_SESSIONS.get(call_sid)
+    return session.get("language_state") if session is not None else None
+
+
+def set_session_language_state(call_sid: str, state: dict[str, Any]) -> None:
+    """Store a JSON-safe per-call language state."""
+
+    session = ACTIVE_SESSIONS.get(call_sid)
+    if session is None:
+        return
+    session["language_state"] = json.loads(json.dumps(state))
+
+
+def append_turn_record(call_sid: str, record: dict[str, Any]) -> None:
+    """Append one finalized per-turn metrics record to the session."""
+
+    session = ACTIVE_SESSIONS.get(call_sid)
+    if session is None:
+        return
+    records: list[dict[str, Any]] = session["metrics"].setdefault("turn_records", [])
+    records.append(json.loads(json.dumps(record)))
+    session["metrics"]["turn_count"] = len(records)
+
+
 def append_session_transcript_event(
     call_sid: str,
     *,

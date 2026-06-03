@@ -12,26 +12,22 @@ from app.services.runtime_config import build_effective_snapshot, get_cached_run
 
 
 class ConfigSnapshot(TypedDict):
-    """Immutable configuration snapshot stored at call start."""
+    """Immutable per-call config snapshot built from the global runtime config.
 
+    Carries the structured ``runtime_config`` plus flattened legacy keys the
+    pipeline/greeting code reads directly.
+    """
+
+    runtime_config: dict[str, Any]
     SYSTEM_PROMPT: str
+    GREETING_PROMPT: str
     LLM_MODEL: str
     LLM_TEMPERATURE: float
     TTS_VOICE_ID: str
     TTS_MODEL: str
-    INITIAL_GREETING_PROMPT: str
-    INITIAL_GREETING_INSTRUCTIONS: str
     INITIAL_GREETING_FALLBACK_TEXT: str
     SAMPLE_RATE: int
     snapshot_version: NotRequired[str]
-    bot_profile: NotRequired[dict[str, Any]]
-    stt_config: NotRequired[dict[str, Any]]
-    llm_config: NotRequired[dict[str, Any]]
-    tts_config: NotRequired[dict[str, Any]]
-    greeting_config: NotRequired[dict[str, Any]]
-    fallback_policy: NotRequired[dict[str, Any]]
-    flow_definition: NotRequired[dict[str, Any]]
-    profile_resolution: NotRequired[dict[str, Any]]
 
 
 class RuntimeSession(TypedDict):

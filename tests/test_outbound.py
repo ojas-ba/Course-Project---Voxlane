@@ -53,12 +53,13 @@ def test_outbound_greeting_success_dials(client):
     assert ctx["config_snapshot"]["snapshot_version"] == "v3"
 
 
-def test_outbound_greeting_failure_does_not_dial(client):
+def test_outbound_greeting_failure_does_not_dial_and_persists(client):
     mock_exotel = AsyncMock()
     client.app.state.exotel_client = mock_exotel
 
     with patch("app.routers.dashboard.load_runtime_config", new_callable=AsyncMock) as mock_cfg, \
-         patch("app.routers.dashboard.generate_outbound_greeting_text", new_callable=AsyncMock) as mock_greet:
+         patch("app.routers.dashboard.generate_outbound_greeting_text", new_callable=AsyncMock) as mock_greet, \
+         patch("app.routers.dashboard.persist_outbound_attempt", new_callable=AsyncMock) as mock_persist:
         mock_cfg.return_value = _default_config()
         mock_greet.side_effect = ValueError("LLM produced no text")
         response = client.post("/telephony/outbound", data={"to_number": "+919876543210"})
@@ -67,19 +68,42 @@ def test_outbound_greeting_failure_does_not_dial(client):
     assert "not placed" in response.text.lower()
     mock_exotel.make_call.assert_not_called()
     assert PENDING_OUTBOUND_CALLS == {}
+    mock_persist.assert_awaited_once()
+    assert mock_persist.call_args.args[0]["reason"] == "greeting_failed"
+
+
+def test_outbound_exotel_failure_does_not_attach_and_persists(client):
+    mock_exotel = AsyncMock()
+    mock_exotel.make_call.return_value = ExotelCallResult(success=False, error="exotel 500")
+    client.app.state.exotel_client = mock_exotel
+
+    with patch("app.routers.dashboard.load_runtime_config", new_callable=AsyncMock) as mock_cfg, \
+         patch("app.routers.dashboard.generate_outbound_greeting_text", new_callable=AsyncMock) as mock_greet, \
+         patch("app.routers.dashboard.persist_outbound_attempt", new_callable=AsyncMock) as mock_persist:
+        mock_cfg.return_value = _default_config()
+        mock_greet.return_value = "Hi there!"
+        response = client.post("/telephony/outbound", data={"to_number": "+919876543210"})
+
+    assert response.status_code == 200
+    mock_exotel.make_call.assert_awaited_once()
+    assert PENDING_OUTBOUND_CALLS == {}  # never attached -> no leak
+    mock_persist.assert_awaited_once()
+    assert mock_persist.call_args.args[0]["reason"] == "exotel_make_call_failed"
 
 
 def test_outbound_config_load_failure_does_not_dial(client):
     mock_exotel = AsyncMock()
     client.app.state.exotel_client = mock_exotel
 
-    with patch("app.routers.dashboard.load_runtime_config", new_callable=AsyncMock) as mock_cfg:
+    with patch("app.routers.dashboard.load_runtime_config", new_callable=AsyncMock) as mock_cfg, \
+         patch("app.routers.dashboard.persist_outbound_attempt", new_callable=AsyncMock) as mock_persist:
         mock_cfg.side_effect = RuntimeError("mongo down")
         response = client.post("/telephony/outbound", data={"to_number": "+919876543210"})
 
     assert response.status_code == 200
     assert "not placed" in response.text.lower()
     mock_exotel.make_call.assert_not_called()
+    assert mock_persist.call_args.args[0]["reason"] == "config_load_failed"
 
 
 def test_outbound_rejects_invalid_number(client):

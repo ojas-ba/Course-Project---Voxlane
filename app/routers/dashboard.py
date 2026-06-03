@@ -18,7 +18,7 @@ from fastapi.templating import Jinja2Templates
 from bson import ObjectId
 from loguru import logger
 
-from app.database import get_database
+from app.database import get_database, persist_outbound_attempt
 from app.config import get_settings
 from app.models.runtime_config_models import RuntimeConfig
 from app.runtime import (
@@ -170,6 +170,24 @@ def _outbound_status(request: Request, **ctx: Any) -> HTMLResponse:
     )
 
 
+async def _persist_failure(
+    *, reason: str, to_number: str, error_message: str | None,
+    config_snapshot: dict[str, Any] | None = None,
+) -> None:
+    """Best-effort persistence of a not-dialed outbound attempt (never raises)."""
+    doc: dict[str, Any] = {
+        "type": "outbound_attempt",
+        "status": "not_dialed",
+        "reason": reason,
+        "to_number": to_number,
+        "created_at": time.time(),
+        "error_message": error_message,
+    }
+    if config_snapshot is not None:
+        doc["config_snapshot"] = config_snapshot
+    await persist_outbound_attempt(doc)
+
+
 @router.post("/telephony/outbound", response_class=HTMLResponse)
 async def post_outbound(request: Request) -> HTMLResponse:
     """Trigger an outbound call. Generates the LLM greeting BEFORE dialing;
@@ -200,6 +218,9 @@ async def post_outbound(request: Request) -> HTMLResponse:
         config = await load_runtime_config(settings)
     except Exception as exc:
         logger.exception("Runtime config load failed; not placing call")
+        # Mongo is likely the thing that's down, so this persist is best-effort
+        # and will usually only structured-log.
+        await _persist_failure(reason="config_load_failed", to_number=to_number, error_message=str(exc))
         return _outbound_status(
             request, success=False,
             error=f"Could not load runtime config; call not placed. ({exc})",
@@ -214,12 +235,21 @@ async def post_outbound(request: Request) -> HTMLResponse:
             greeting_text = await generate_outbound_greeting_text(
                 snapshot=snapshot, settings=settings, to_number=to_number,
             )
-    except (TimeoutError, Exception) as exc:  # noqa: B014 - explicit: any failure = no call
-        reason = "Greeting generation timed out" if isinstance(exc, TimeoutError) else str(exc)
-        logger.warning("Outbound greeting failed; not placing call: {err}", err=reason)
+    except TimeoutError:
+        logger.warning("Outbound greeting timed out; not placing call")
+        await _persist_failure(reason="greeting_timeout", to_number=to_number,
+                               error_message="greeting generation timed out", config_snapshot=snapshot)
         return _outbound_status(
             request, success=False,
-            error=f"Greeting generation failed; call not placed. ({reason})",
+            error="Greeting generation timed out; call not placed.",
+        )
+    except Exception as exc:
+        logger.warning("Outbound greeting failed; not placing call: {err}", err=str(exc))
+        await _persist_failure(reason="greeting_failed", to_number=to_number,
+                               error_message=str(exc), config_snapshot=snapshot)
+        return _outbound_status(
+            request, success=False,
+            error=f"Greeting generation failed; call not placed. ({exc})",
         )
     greeting_completed_at = time.time()
 
@@ -239,15 +269,21 @@ async def post_outbound(request: Request) -> HTMLResponse:
         greeting_metrics=greeting_metrics,
     )
 
-    # 3. Greeting is ready -> place the call.
+    # 3. Greeting is ready -> place the call. (pending_context is only registered
+    # in PENDING_OUTBOUND_CALLS via attach_pending_call_sid on success, so a
+    # make_call failure leaves nothing to clean up.)
     try:
         async with asyncio.timeout(10.0):
             result = await client.make_call(to_number)
     except TimeoutError:
         logger.error("Outbound call timed out after 10 seconds")
+        await _persist_failure(reason="exotel_make_call_timeout", to_number=to_number,
+                               error_message="outbound call request timed out", config_snapshot=snapshot)
         return _outbound_status(request, success=False, error="Outbound call request timed out.")
     except Exception as exc:
         logger.exception("Failed to trigger outbound call via client")
+        await _persist_failure(reason="exotel_make_call_failed", to_number=to_number,
+                               error_message=str(exc), config_snapshot=snapshot)
         return _outbound_status(request, success=False, error=f"Internal outbound client error: {exc}")
 
     outbound_error = result.error
@@ -257,6 +293,9 @@ async def post_outbound(request: Request) -> HTMLResponse:
 
     if outbound_success and result.call_sid:
         attach_pending_call_sid(pending_context, call_sid=result.call_sid)
+    else:
+        await _persist_failure(reason="exotel_make_call_failed", to_number=to_number,
+                               error_message=outbound_error, config_snapshot=snapshot)
 
     return _outbound_status(
         request, success=outbound_success, to_number=to_number,

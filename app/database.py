@@ -85,6 +85,25 @@ async def persist_call_log(call_log: CallLog) -> str:
     return str(result.inserted_id)
 
 
+OUTBOUND_ATTEMPTS_COLLECTION = "outbound_attempts"
+
+
+async def persist_outbound_attempt(doc: dict) -> str | None:
+    """Persist a lightweight outbound-attempt record (e.g. a not-dialed failure).
+
+    Best-effort: returns None and logs if the database is unavailable, so a
+    failed outbound never raises on top of the original failure.
+    """
+
+    try:
+        db = get_database()
+        result = await db[OUTBOUND_ATTEMPTS_COLLECTION].insert_one(doc)
+        return str(result.inserted_id)
+    except Exception:
+        logger.warning("Could not persist outbound attempt (db unavailable): {reason}", reason=doc.get("reason"))
+        return None
+
+
 async def close_database() -> None:
     """Close the Motor client. Called at application shutdown."""
 

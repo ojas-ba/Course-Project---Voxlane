@@ -6,6 +6,8 @@ import json
 import time
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
+from loguru import logger
+
 from app.config import Settings
 from app.models.runtime_config_models import RuntimeConfig
 from app.services.runtime_config import build_effective_snapshot, get_cached_runtime_config
@@ -82,7 +84,16 @@ def build_config_snapshot(
     for signature compatibility but ignored — V3 has a single global config.
     """
 
-    config = get_cached_runtime_config() or RuntimeConfig.default(settings)
+    config = get_cached_runtime_config()
+    if config is None:
+        # In production the cache is populated at startup (and startup fails hard
+        # if Mongo is down), so this path should only occur in tests/degraded
+        # setups. Make it visible rather than silently serving a default.
+        logger.warning(
+            "build_config_snapshot: no cached runtime config; using canonical "
+            "default. (Expected only in tests / before startup seeding.)"
+        )
+        config = RuntimeConfig.default(settings)
     return cast(ConfigSnapshot, build_effective_snapshot(config))
 
 

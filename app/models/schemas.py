@@ -113,5 +113,10 @@ class CallLog(BaseModel):
     call_transport_status: str = "completed"
     conversation_outcome: str = "incomplete"
     final_conversation_phase: str | None = None
+    # TODO(phase2-metrics): vestigial slot-flow fields. V3 never sets a slot-based
+    # conversation_state, so these stay at 0/[] and are harmless. Remove together
+    # with _conversation_summary's slot logic when the call-outcome model is
+    # redesigned (also drop RuntimeSession.conversation_state). Left now to avoid
+    # churning the still-passing finalize tests during the review pass.
     slots_collected_count: int = 0
     required_slots_missing: list[str] = Field(default_factory=list)

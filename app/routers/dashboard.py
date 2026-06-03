@@ -78,12 +78,26 @@ async def _load_config_or_default() -> RuntimeConfig:
 @router.get("/", response_class=HTMLResponse)
 @router.get("/config", response_class=HTMLResponse)
 async def get_config(request: Request) -> HTMLResponse:
-    """Render the runtime configuration + outbound-call page."""
-    config = await _load_config_or_default()
+    """Render the runtime configuration + outbound-call page.
+
+    Loads the live config from Mongo. If that fails, render defaults but show a
+    visible warning so a fallback is never mistaken for a saved Mongo config.
+    """
+    settings = get_settings()
+    warning = None
+    try:
+        config = await load_runtime_config(settings)
+    except Exception as exc:
+        logger.warning("Runtime config load failed for config page: {err}", err=exc)
+        config = get_cached_runtime_config() or RuntimeConfig.default(settings)
+        warning = (
+            "Could not load runtime config from MongoDB; showing the last-known/"
+            f"default config (NOT saved). Fix the database before dialing. ({exc})"
+        )
     return templates.TemplateResponse(
         request=request,
         name="config.html",
-        context={"config": config, "saved": False, "error": None},
+        context={"config": config, "saved": False, "error": warning},
     )
 
 

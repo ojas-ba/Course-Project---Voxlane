@@ -1,4 +1,75 @@
+import asyncio
+
+from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
+    LLMTextFrame,
+    TextFrame,
+    TranscriptionFrame,
+    TTSStartedFrame,
+    TTSTextFrame,
+    UserStoppedSpeakingFrame,
+)
+from pipecat.observers.base_observer import FramePushed
+from pipecat.processors.frame_processor import FrameDirection
+
 from app.services.call_metrics import TurnMetricsObserver, _ms
+
+
+def _push(obs, frame):
+    data = FramePushed(
+        source=None, destination=None, frame=frame,
+        direction=FrameDirection.DOWNSTREAM, timestamp=0,
+    )
+    asyncio.run(obs.on_push_frame(data))
+
+
+def test_assistant_text_frame_type_discrimination():
+    # The fix: capture only LLMTextFrame, not the broad TextFrame whose
+    # subclasses include user transcription and TTS text.
+    assert issubclass(LLMTextFrame, TextFrame)
+    assert not issubclass(TranscriptionFrame, LLMTextFrame)
+    assert not issubclass(TTSTextFrame, LLMTextFrame)
+
+
+def test_assistant_text_captured_from_llm_text_frames_only():
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    _push(obs, UserStoppedSpeakingFrame())
+    obs.note_user_turn(turn_id=1, user_text="hello", stt_eot_received_at=1.0, turn_committed_at=1.0)
+    _push(obs, LLMFullResponseStartFrame())
+    _push(obs, LLMTextFrame("Hello "))
+    _push(obs, LLMTextFrame("there!"))
+    _push(obs, LLMFullResponseEndFrame())
+    _push(obs, TTSStartedFrame())
+    _push(obs, BotStartedSpeakingFrame())
+
+    assert len(out) == 1
+    rec = out[0]
+    assert rec["assistant_text"] == "Hello there!"
+    assert rec["llm_first_token_or_text_at"] is not None
+    assert rec["primary_latency_ms"] is not None
+
+
+def test_user_stopped_falls_back_to_eot_when_no_vad_frame():
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    # No UserStoppedSpeakingFrame pushed.
+    obs.note_user_turn(turn_id=1, user_text="x", stt_eot_received_at=5.0, turn_committed_at=5.1)
+    _push(obs, BotStartedSpeakingFrame())
+    assert out[0]["user_stopped_speaking_at"] == 5.0
+    assert out[0]["user_stopped_is_eot_fallback"] is True
+    assert out[0]["primary_latency_ms"] is not None
+
+
+def test_language_resolved_at_finalize_from_provider():
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append, language_provider=lambda: ("hi", "hi"))
+    obs.note_user_turn(turn_id=1, user_text="haan", stt_eot_received_at=1.0, turn_committed_at=1.0)
+    _push(obs, BotStartedSpeakingFrame())
+    assert out[0]["detected_language"] == "hi"
+    assert out[0]["response_language"] == "hi"
 
 
 def test_ms_helper():

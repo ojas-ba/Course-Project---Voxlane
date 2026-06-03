@@ -19,7 +19,7 @@ from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
-    TextFrame,
+    LLMTextFrame,
     TTSStartedFrame,
     UserStoppedSpeakingFrame,
 )
@@ -34,11 +34,25 @@ def _ms(later: float | None, earlier: float | None) -> float | None:
 
 
 class TurnMetricsObserver(BaseObserver):
-    """Build one TurnRecord per user->bot turn and emit it via ``on_record``."""
+    """Build one TurnRecord per user->bot turn and emit it via ``on_record``.
 
-    def __init__(self, *, on_record: Callable[[dict[str, Any]], None]) -> None:
+    Assistant text/first-token are captured from ``LLMTextFrame`` specifically
+    (not the broad ``TextFrame``, whose subclasses include the user's
+    ``TranscriptionFrame`` and the TTS ``TTSTextFrame`` — those would otherwise
+    pollute ``assistant_text``). Detected/response language is resolved at
+    finalize via ``language_provider`` so it reflects the fully-updated per-call
+    language state rather than a value read mid-turn (avoids a timing race).
+    """
+
+    def __init__(
+        self,
+        *,
+        on_record: Callable[[dict[str, Any]], None],
+        language_provider: Callable[[], tuple[str | None, str | None]] | None = None,
+    ) -> None:
         super().__init__()
         self._on_record = on_record
+        self._language_provider = language_provider
         self._open: dict[str, Any] | None = None
         self._pending_user_stopped_at: float | None = None
         self._assistant_parts: list[str] = []
@@ -54,13 +68,20 @@ class TurnMetricsObserver(BaseObserver):
         turn_committed_at: float,
     ) -> None:
         self._assistant_parts = []
+        # If no VAD/turn UserStoppedSpeakingFrame was seen, fall back to the
+        # server-side EOT timestamp so primary latency is never silently null.
+        user_stopped = self._pending_user_stopped_at
+        user_stopped_is_fallback = user_stopped is None
+        if user_stopped_is_fallback:
+            user_stopped = stt_eot_received_at
         self._open = {
             "turn_id": turn_id,
             "user_text": user_text,
             "assistant_text": "",
             "detected_language": None,
             "response_language": None,
-            "user_stopped_speaking_at": self._pending_user_stopped_at,
+            "user_stopped_speaking_at": user_stopped,
+            "user_stopped_is_eot_fallback": user_stopped_is_fallback,
             "stt_eot_received_at": stt_eot_received_at,
             "turn_committed_at": turn_committed_at,
             "llm_request_started_at": None,
@@ -99,7 +120,7 @@ class TurnMetricsObserver(BaseObserver):
 
         if isinstance(frame, LLMFullResponseStartFrame):
             self._open["llm_request_started_at"] = now
-        elif isinstance(frame, TextFrame):
+        elif isinstance(frame, LLMTextFrame):
             if self._open["llm_first_token_or_text_at"] is None:
                 self._open["llm_first_token_or_text_at"] = now
             self._assistant_parts.append(frame.text or "")
@@ -117,6 +138,14 @@ class TurnMetricsObserver(BaseObserver):
         rec = self._open
         if rec is None:
             return
+        # Resolve language from the fully-updated per-call state (post-processing),
+        # avoiding a race with the upstream LanguageProcessor.
+        if self._language_provider is not None:
+            detected, response = self._language_provider()
+            if rec.get("detected_language") is None:
+                rec["detected_language"] = detected
+            if rec.get("response_language") is None:
+                rec["response_language"] = response
         rec["primary_latency_ms"] = _ms(rec["first_audio_frame_sent_at"], rec["user_stopped_speaking_at"])
         rec["eot_delay_ms"] = _ms(rec["stt_eot_received_at"], rec["user_stopped_speaking_at"])
         rec["commit_delay_ms"] = _ms(rec["turn_committed_at"], rec["stt_eot_received_at"])

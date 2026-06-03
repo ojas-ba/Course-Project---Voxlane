@@ -328,11 +328,8 @@ def _build_pipeline_processors(
                 stt_eot_received_at=now,
                 turn_committed_at=time.time(),
             )
-            state = get_session_language_state(call_sid) or lang.new_language_state()
-            metrics_observer.note_language(
-                detected_language=state.get("last_user_language"),
-                response_language=state.get("response_language"),
-            )
+            # Language is resolved at metric finalize (after the LanguageProcessor
+            # has updated per-call state), so it is not read here to avoid a race.
 
     return [
         transport.input(),
@@ -394,7 +391,13 @@ async def run_pipeline(
         )
         set_session_memory(call_sid, memory)
 
-    metrics_observer = TurnMetricsObserver(on_record=_on_turn_record)
+    def _language_provider() -> tuple[str | None, str | None]:
+        state = get_session_language_state(call_sid) or {}
+        return state.get("last_user_language"), state.get("response_language")
+
+    metrics_observer = TurnMetricsObserver(
+        on_record=_on_turn_record, language_provider=_language_provider
+    )
 
     pipeline = Pipeline(
         _build_pipeline_processors(

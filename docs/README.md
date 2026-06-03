@@ -1,44 +1,13 @@
 # Voice Agent Documentation
 
-This repository contains a local-development voice agent prototype using FastAPI, Exotel, Pipecat, Deepgram Flux, Cerebras, Cartesia, and MongoDB-style call-log persistence.
+Local-development, open-ended multilingual voice agent prototype using FastAPI, Exotel, Pipecat, Deepgram Flux, Cerebras, Cartesia, and MongoDB call-log persistence.
 
 ## Source Of Truth
 
-- Current architecture and behavior contracts: `docs/current/`
-- Rebuild roadmap and phase plans: `docs/plans/`
-- Accepted architecture decisions (ADRs): `docs/decisions/`
-- Design rulebooks for implementation contracts: `docs/design/`
-- Historical specs/phase docs/notes: `docs/archive/`
+- [V3_CLEANUP_PLAN.md](V3_CLEANUP_PLAN.md) — V3 cleanup & rebuild plan (final decisions, phases, scope)
+- [V3_REDESIGN_RESEARCH.md](V3_REDESIGN_RESEARCH.md) — architecture research/evidence behind the decisions
+- [decisions/](decisions/) — accepted architecture decisions (ADRs 001, 002, 004, 005; 003 pending V3 revision)
 
-## Start Here
+## Notes
 
-- Read `docs/current/ARCHITECTURE.md`
-- Read `docs/current/CONFIGURATION.md`
-- Read `docs/current/RUNTIME_FLOW.md`
-- For V2 work, begin with `docs/plans/VOICE_AGENT_V2_REBUILD_PLAN.md`
-
-## Main V2 Specification
-
-- `docs/specs/VOICE_AGENT_V2_SPEC.md` - source-of-truth engineering specification for the V2 rebuild.
-
-## Design Rulebooks
-
-- `docs/design/TURN_AND_CONVERSATION_RULES.md` - operational rules for turn-taking, conversation state, LLM boundaries, speech composition, and latency tradeoffs.
-
-## Source-Of-Truth Priority
-
-1. `docs/specs/`
-2. `docs/decisions/`
-3. `docs/design/`
-4. `docs/current/`
-5. `docs/plans/`
-6. `docs/archive/`
-
-Meaning:
-
-- spec defines what to build
-- ADRs define fixed decisions
-- design docs define operational implementation rules
-- current docs explain architecture/runtime
-- plans explain implementation order
-- archive is historical reference only
+V1/V2 phase plans, specs, "current" architecture docs, and design rulebooks were removed in the V3 Phase 0 cleanup. They are recoverable from git history at tag `pre-v3-cleanup`.

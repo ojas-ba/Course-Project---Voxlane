@@ -13,6 +13,7 @@ from app.routers.dashboard import router as dashboard_router
 from app.routers.telephony import router as telephony_router
 from app.services.exotel_client import ExotelOutboundClient
 from app.services.runtime_config import seed_runtime_config_if_missing
+from app.services.warmup import run_local_warmup
 
 
 @asynccontextmanager
@@ -32,6 +33,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await seed_runtime_config_if_missing(settings)
     except Exception:
         logger.exception("Failed to seed/load runtime config at startup")
+
+    # Warm local cold-start components (Silero VAD, audio stack) so the first
+    # call's greeting is fast. Local only — no provider sockets/billing.
+    try:
+        await run_local_warmup(settings)
+    except Exception:
+        logger.exception("Local warmup failed (continuing; first call may be slower)")
 
     # Initialize Exotel outbound client (optional — server starts without it)
     try:

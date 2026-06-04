@@ -1,4 +1,4 @@
-"""Startup behavior: MongoDB is required (no warn-and-continue)."""
+"""Startup behavior: MongoDB is required (no warn-and-continue); warmup runs."""
 
 import pytest
 from unittest.mock import AsyncMock, patch
@@ -10,6 +10,7 @@ from main import app
 def test_startup_succeeds_and_seeds_when_db_ok():
     with patch("main.init_database", new_callable=AsyncMock) as init, \
          patch("main.seed_runtime_config_if_missing", new_callable=AsyncMock) as seed, \
+         patch("main.run_local_warmup", new_callable=AsyncMock), \
          patch("main.close_database", new_callable=AsyncMock):
         with TestClient(app):
             pass
@@ -17,8 +18,19 @@ def test_startup_succeeds_and_seeds_when_db_ok():
         seed.assert_awaited()  # runtime config seed/load attempted at startup
 
 
+def test_startup_invokes_local_warmup():
+    with patch("main.init_database", new_callable=AsyncMock), \
+         patch("main.seed_runtime_config_if_missing", new_callable=AsyncMock), \
+         patch("main.run_local_warmup", new_callable=AsyncMock) as warm, \
+         patch("main.close_database", new_callable=AsyncMock):
+        with TestClient(app):
+            pass
+        warm.assert_awaited()
+
+
 def test_startup_fails_clearly_when_mongo_unavailable():
     with patch("main.init_database", new_callable=AsyncMock) as init, \
+         patch("main.run_local_warmup", new_callable=AsyncMock), \
          patch("main.close_database", new_callable=AsyncMock):
         init.side_effect = RuntimeError("mongo unavailable")
         with pytest.raises(Exception):
@@ -31,7 +43,18 @@ def test_startup_tolerates_seed_failure_but_still_starts():
     # but per-call config load still guards outbound separately.
     with patch("main.init_database", new_callable=AsyncMock), \
          patch("main.seed_runtime_config_if_missing", new_callable=AsyncMock) as seed, \
+         patch("main.run_local_warmup", new_callable=AsyncMock), \
          patch("main.close_database", new_callable=AsyncMock):
         seed.side_effect = RuntimeError("seed hiccup")
+        with TestClient(app) as c:
+            assert c.get("/config").status_code == 200
+
+
+def test_startup_tolerates_warmup_failure_but_still_starts():
+    with patch("main.init_database", new_callable=AsyncMock), \
+         patch("main.seed_runtime_config_if_missing", new_callable=AsyncMock), \
+         patch("main.run_local_warmup", new_callable=AsyncMock) as warm, \
+         patch("main.close_database", new_callable=AsyncMock):
+        warm.side_effect = RuntimeError("warmup boom")
         with TestClient(app) as c:
             assert c.get("/config").status_code == 200

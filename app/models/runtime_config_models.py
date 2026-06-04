@@ -17,9 +17,10 @@ from app.config import Settings
 GLOBAL_CONFIG_ID = "global"
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are a low-latency multilingual voice assistant. Keep replies natural, "
-    "concise, and useful. Reply in the same language as the user unless they "
-    "explicitly ask otherwise."
+    "You are a helpful, friendly assistant on a live phone call. Keep replies "
+    "natural, concise, and genuinely useful. Because this is a phone call, keep "
+    "answers short — usually 1-2 sentences — and ask one question at a time. "
+    "Give a longer answer only when the caller explicitly asks for detail."
 )
 DEFAULT_GREETING_PROMPT = (
     "Generate a short, warm English opening greeting for a phone call. The "
@@ -33,6 +34,9 @@ class STTCfg(BaseModel):
     language_hints: list[str] = Field(default_factory=lambda: ["en", "hi"])
     eot_threshold: float = 0.65
     eot_timeout_ms: int = 700
+    # Connect the Flux websocket in the background on start so the opening
+    # greeting isn't blocked ~1s waiting for STT (see deferred_flux_stt.py).
+    defer_connect_on_start: bool = True
 
 
 class LLMCfg(BaseModel):

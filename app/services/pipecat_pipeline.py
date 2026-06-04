@@ -4,22 +4,26 @@ Assembles and runs the multilingual STT -> LLM -> TTS pipeline over the Exotel
 transport. Processor order:
 
     transport.input()
-      -> Deepgram Flux STT (flux-general-multi, language hints from config)
-      -> LanguageProcessor (detect language, switch Cartesia language per turn)
+      -> Deepgram Flux STT (flux-general-multi; background connect, §deferred)
+      -> SttLanguageHintProcessor (records weak detected-language hint only)
+      -> MemoryProcessor (system block = persona + <en>/<hi> policy + memory)
       -> context_aggregator.user()
-      -> Cerebras GPT-OSS LLM
+      -> Cerebras GPT-OSS LLM (reply starts with an <en>/<hi> tag)
+      -> LanguagePrefixProcessor (strip tag, set Cartesia language, stream text)
       -> Cartesia TTS
       -> transport.output()
       -> context_aggregator.assistant()
+
+Language is **LLM-led**: the model tags each reply ``<en>``/``<hi>`` and the
+LanguagePrefixProcessor routes Cartesia's language from that tag while streaming
+the spoken text — one LLM call per turn, no regex override engine, no JSON
+buffering. Detected STT language is only a weak prompt hint.
 
 The committed user turn is driven natively by Flux end-of-turn (finalized
 TranscriptionFrame + UserStoppedSpeakingFrame), which flushes the user
 aggregator into the LLM. TurnCollector + TurnMetricsObserver ride the
 ``on_end_of_turn`` side channel for commit/transcript/metrics; they do NOT
 generate replies. The pre-dial greeting is the only manually queued speech.
-
-Bounded in-call memory (recent window + pinned facts + running summary) is
-added in a later batch via a MemoryProcessor between ``user()`` and the LLM.
 """
 
 from __future__ import annotations
@@ -33,7 +37,6 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
     TranscriptionFrame,
     TTSSpeakFrame,
-    TTSUpdateSettingsFrame,
 )
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.pipeline.pipeline import Pipeline
@@ -73,6 +76,8 @@ from app.runtime import (
 from app.services import language as lang
 from app.services import memory as mem
 from app.services.call_metrics import TurnMetricsObserver
+from app.services.deferred_flux_stt import DeferredConnectDeepgramFluxSTTService
+from app.services.language_prefix import LanguagePrefixProcessor
 from app.services.turn_collector import TurnCollector, utc_now
 
 MULTILINGUAL_FLUX_MODEL = "flux-general-multi"
@@ -90,7 +95,9 @@ def _build_stt(snapshot: ConfigSnapshot, settings: Settings) -> DeepgramFluxSTTS
     """Construct the Deepgram Flux STT service from the runtime config.
 
     Uses ``flux-general-multi`` with language hints for Hindi/English. Hints are
-    only honored on the multilingual model, so they are only passed there.
+    only honored on the multilingual model, so they are only passed there. When
+    ``stt.defer_connect_on_start`` is set (default), the deferred-connect subclass
+    is used so the opening greeting isn't blocked behind the Flux websocket.
     """
 
     cfg = _stt_cfg(snapshot)
@@ -104,7 +111,12 @@ def _build_stt(snapshot: ConfigSnapshot, settings: Settings) -> DeepgramFluxSTTS
     if hints and model == MULTILINGUAL_FLUX_MODEL:
         stt_settings.language_hints = hints
 
-    return DeepgramFluxSTTService(
+    stt_cls = (
+        DeferredConnectDeepgramFluxSTTService
+        if cfg.get("defer_connect_on_start", True)
+        else DeepgramFluxSTTService
+    )
+    return stt_cls(
         api_key=settings.deepgram_api_key,
         sample_rate=V1_SAMPLE_RATE,
         should_interrupt=False,
@@ -114,7 +126,8 @@ def _build_stt(snapshot: ConfigSnapshot, settings: Settings) -> DeepgramFluxSTTS
 
 def _build_tts(snapshot: ConfigSnapshot, settings: Settings) -> CartesiaTTSService:
     """Construct the Cartesia TTS service. Language is switched per turn via
-    TTSUpdateSettingsFrame from the LanguageProcessor."""
+    TTSUpdateSettingsFrame emitted by the LanguagePrefixProcessor (from the
+    LLM's <en>/<hi> tag)."""
 
     return CartesiaTTSService(
         api_key=settings.cartesia_api_key,
@@ -167,15 +180,18 @@ def _normalize_transcript_text(text: str) -> str:
     return " ".join(text.split())
 
 
-class LanguageProcessor(FrameProcessor):
-    """Detect the user's language from finalized STT and switch Cartesia's
-    output language per turn. Updates the per-call language state; the EOT side
-    channel reads that state for metrics. Does not generate replies."""
+class SttLanguageHintProcessor(FrameProcessor):
+    """Record the weak STT-detected language as a per-call hint.
+
+    It does NOT decide the response language and does NOT switch TTS — the LLM's
+    ``<en>``/``<hi>`` tag is the authority (routed downstream by the
+    LanguagePrefixProcessor). The hint feeds the prompt and the metrics
+    detected-language field. Does not generate replies.
+    """
 
     def __init__(self, *, call_sid: str) -> None:
         super().__init__()
         self._call_sid = call_sid
-        self._last_tts_language: str | None = None
 
     async def process_frame(
         self, frame: Any, direction: FrameDirection = FrameDirection.DOWNSTREAM
@@ -186,24 +202,11 @@ class LanguageProcessor(FrameProcessor):
             and isinstance(frame, TranscriptionFrame)
             and getattr(frame, "finalized", False)
         ):
-            await self._handle_user_language(frame)
+            detected = lang.detect_language_from_transcription(frame)
+            state = get_session_language_state(self._call_sid) or lang.new_language_state()
+            lang.record_stt_language_hint(state, detected)
+            set_session_language_state(self._call_sid, state)
         await self.push_frame(frame, direction)
-
-    async def _handle_user_language(self, frame: TranscriptionFrame) -> None:
-        detected = lang.detect_language_from_transcription(frame)
-        state = get_session_language_state(self._call_sid) or lang.new_language_state()
-        lang.update_language_state(state, user_text=frame.text or "", detected_language=detected)
-        set_session_language_state(self._call_sid, state)
-
-        response_language = state["response_language"]
-        if response_language != self._last_tts_language:
-            self._last_tts_language = response_language
-            enum = lang.to_language_enum(response_language)
-            if enum is not None:
-                await self.push_frame(
-                    TTSUpdateSettingsFrame(delta=CartesiaTTSSettings(language=enum)),
-                    FrameDirection.DOWNSTREAM,
-                )
 
 
 class MemoryProcessor(FrameProcessor):
@@ -252,7 +255,7 @@ class MemoryProcessor(FrameProcessor):
         set_session_memory(self._call_sid, memory)
 
         lstate = get_session_language_state(self._call_sid) or lang.new_language_state()
-        instruction = lang.language_instruction(lstate.get("response_language", "en"))
+        hint = lang.language_hint_line(lstate)
 
         recall: list[str] = []
         if self._cfg.get("recall_only_when_user_asks", True) and mem.recall_triggered(user_text):
@@ -263,7 +266,8 @@ class MemoryProcessor(FrameProcessor):
 
         system_block = mem.build_system_block(
             self._base_system,
-            language_instruction=instruction,
+            language_policy=lang.RESPONSE_LANGUAGE_POLICY,
+            language_hint=hint,
             pinned_facts=memory["pinned_facts"],
             running_summary=memory.get("running_summary"),
             recall_snippets=recall,
@@ -297,12 +301,15 @@ def _build_pipeline_processors(
     llm = _build_llm(snapshot, settings)
     context = _build_context(snapshot)
     aggregator_pair = _build_aggregator_pair(context)
-    language_processor = LanguageProcessor(call_sid=call_sid)
+    stt_language_hint = SttLanguageHintProcessor(call_sid=call_sid)
     memory_processor = MemoryProcessor(
         call_sid=call_sid,
         context=context,
         base_system_prompt=snapshot["SYSTEM_PROMPT"],
         memory_cfg=(snapshot.get("runtime_config") or {}).get("memory") or {},
+    )
+    language_prefix = LanguagePrefixProcessor(
+        call_sid=call_sid, metrics_observer=metrics_observer
     )
     turn_collector = TurnCollector(call_sid=call_sid, stream_sid=stream_sid)
 
@@ -328,16 +335,17 @@ def _build_pipeline_processors(
                 stt_eot_received_at=now,
                 turn_committed_at=time.time(),
             )
-            # Language is resolved at metric finalize (after the LanguageProcessor
-            # has updated per-call state), so it is not read here to avoid a race.
+            # Language is annotated by the LanguagePrefixProcessor (from the LLM
+            # tag) and resolved at metric finalize, so it is not read here.
 
     return [
         transport.input(),
         stt,
-        language_processor,
+        stt_language_hint,
         memory_processor,
         aggregator_pair.user(),
         llm,
+        language_prefix,
         tts,
         transport.output(),
         aggregator_pair.assistant(),

@@ -136,13 +136,21 @@ def update_summary_if_due(
 def build_system_block(
     base_system_prompt: str,
     *,
-    language_instruction: str,
+    language_policy: str,
+    language_hint: str | None = None,
     pinned_facts: list[str],
     running_summary: str | None,
     recall_snippets: list[str],
 ) -> str:
-    """Assemble the dynamic system message for one turn."""
-    parts = [base_system_prompt.strip(), language_instruction.strip()]
+    """Assemble the dynamic system message for one turn.
+
+    ``language_policy`` is the always-injected, code-owned <en>/<hi> contract;
+    ``language_hint`` is an optional weak STT-derived hint. The persona prompt
+    stays user-editable while the parser contract cannot be edited away.
+    """
+    parts = [base_system_prompt.strip(), language_policy.strip()]
+    if language_hint:
+        parts.append(language_hint.strip())
     if pinned_facts:
         parts.append("Known facts for this call:\n- " + "\n- ".join(pinned_facts))
     if running_summary:

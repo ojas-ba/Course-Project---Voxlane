@@ -3,41 +3,74 @@ from pipecat.transcriptions.language import Language
 from app.services import language as lang
 
 
-def test_override_english_variants():
-    for t in ["please continue in English", "switch to English", "English mein bolo", "speak english"]:
-        assert lang.parse_language_override(t) == "en", t
+def test_coerce_response_language_validates():
+    assert lang.coerce_response_language("en") == "en"
+    assert lang.coerce_response_language("hi") == "hi"
+    assert lang.coerce_response_language("EN") == "en"
+    assert lang.coerce_response_language("hi-IN") == "hi"
+    assert lang.coerce_response_language("fr", fallback="hi") == "hi"
+    assert lang.coerce_response_language("zz") == "en"  # default fallback
+    assert lang.coerce_response_language(None) == "en"
 
 
-def test_override_hindi_variants():
-    for t in ["Hindi mein bolo", "hindi me bolo", "Hindi mein baat karo", "hindi me baat karo", "switch to hindi"]:
-        assert lang.parse_language_override(t) == "hi", t
+def test_parse_prefix_basic_en_and_hi():
+    assert lang.try_parse_language_prefix("<en> hello") == ("en", " hello", True)
+    assert lang.try_parse_language_prefix("<hi> namaste") == ("hi", " namaste", True)
 
 
-def test_no_override_on_plain_hinglish():
-    assert lang.parse_language_override("haan mai abhi ghar ja raha hu") is None
+def test_parse_prefix_case_insensitive_and_leading_ws():
+    assert lang.try_parse_language_prefix("<EN> Hi")[0] == "en"
+    lang_code, remainder, done = lang.try_parse_language_prefix("  <hi> baat")
+    assert (lang_code, done) == ("hi", True)
+    assert remainder == " baat"
 
 
-def test_resolution_precedence_override_wins():
+def test_parse_prefix_split_across_frames_keeps_building():
+    # Partial tags are not yet decidable -> done False, caller keeps buffering.
+    assert lang.try_parse_language_prefix("<") == (None, "<", False)
+    assert lang.try_parse_language_prefix("<e") == (None, "<e", False)
+    assert lang.try_parse_language_prefix("<en") == (None, "<en", False)
+    assert lang.try_parse_language_prefix("") == (None, "", False)
+
+
+def test_parse_prefix_gives_up_when_not_a_tag():
+    # First real char isn't part of <en>/<hi> -> fall back immediately (done True).
+    code, _, done = lang.try_parse_language_prefix("Hello, no tag here")
+    assert code is None and done is True
+    code, _, done = lang.try_parse_language_prefix("<xy> nope")
+    assert code is None and done is True
+
+
+def test_parse_prefix_gives_up_at_max_chars():
+    code, _, done = lang.try_parse_language_prefix("<e" + "x" * 50, max_prefix_chars=8)
+    assert code is None and done is True
+
+
+def test_record_stt_language_hint_updates_state():
     st = lang.new_language_state()
-    st["last_user_language"] = "hi"
-    assert lang.resolve_response_language(st) == "hi"
-    st["explicit_language_override"] = "en"
-    assert lang.resolve_response_language(st) == "en"
-
-
-def test_update_state_detects_and_counts():
-    st = lang.new_language_state()
-    lang.update_language_state(st, user_text="haan theek hai", detected_language="hi")
+    assert "explicit_language_override" not in st
+    lang.record_stt_language_hint(st, "hi")
     assert st["last_user_language"] == "hi"
-    assert st["response_language"] == "hi"
     assert st["turn_count"] == 1
-
-
-def test_update_state_override_sticky_even_when_detected_differs():
-    st = lang.new_language_state()
-    lang.update_language_state(st, user_text="continue in English", detected_language="hi")
-    assert st["explicit_language_override"] == "en"
+    # response_language is NOT decided by STT (the LLM tag decides it).
     assert st["response_language"] == "en"
+
+
+def test_fallback_response_language_order():
+    assert lang.fallback_response_language(None) == "en"
+    assert lang.fallback_response_language({"response_language": "hi"}) == "hi"
+    assert lang.fallback_response_language(
+        {"response_language": "zz", "last_user_language": "hi"}
+    ) == "hi"
+    assert lang.fallback_response_language({"last_user_language": "en"}) == "en"
+
+
+def test_record_response_language_coerces():
+    st = lang.new_language_state()
+    lang.record_response_language(st, "hi")
+    assert st["response_language"] == "hi"
+    lang.record_response_language(st, "garbage")  # keeps last valid (hi)
+    assert st["response_language"] == "hi"
 
 
 def test_hints_mapping_drops_unknown():
@@ -45,12 +78,12 @@ def test_hints_mapping_drops_unknown():
     assert Language.EN in enums and Language.HI in enums and len(enums) == 2
 
 
-def test_language_instruction_mentions_target():
-    assert "Hindi" in lang.language_instruction("hi")
-    assert "English" in lang.language_instruction("en")
-
-
 def test_detect_from_transcription_normalizes():
     class _F:
         language = "en-US"
     assert lang.detect_language_from_transcription(_F()) == "en"
+
+
+def test_policy_mentions_both_tags():
+    assert "<en>" in lang.RESPONSE_LANGUAGE_POLICY
+    assert "<hi>" in lang.RESPONSE_LANGUAGE_POLICY

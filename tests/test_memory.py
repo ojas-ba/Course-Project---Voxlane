@@ -65,13 +65,15 @@ def test_trim_recent_messages_keeps_two_per_pair():
 def test_build_system_block_includes_sections():
     block = mem.build_system_block(
         "Base prompt.",
-        language_instruction="Respond in Hindi.",
+        language_policy="Begin every reply with <en> or <hi>.",
+        language_hint="(Weak hint: user looked like Hindi.)",
         pinned_facts=["User wants low latency."],
         running_summary="Earlier the user discussed voice config.",
         recall_snippets=["use hindi"],
     )
     assert "Base prompt." in block
-    assert "Respond in Hindi." in block
+    assert "<en> or <hi>" in block
+    assert "Weak hint" in block
     assert "User wants low latency." in block
     assert "Earlier the user discussed voice config." in block
     assert "use hindi" in block

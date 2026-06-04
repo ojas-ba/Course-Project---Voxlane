@@ -26,8 +26,7 @@ def _seed_session(call_sid: str):
         "config_snapshot": {},
         "memory": {"pinned_facts": [], "running_summary": None, "summary_last_updated_turn": 0},
         "language_state": {
-            "last_user_language": "en", "response_language": "en",
-            "explicit_language_override": None, "turn_count": 0,
+            "last_user_language": "en", "response_language": "en", "turn_count": 0,
         },
     }
 

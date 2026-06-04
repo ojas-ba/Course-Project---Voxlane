@@ -48,7 +48,7 @@
     <tbody>
     {% for r in turn_records %}
       <tr>
-        <td>{{ r.turn_id }}</td>
+        <td>{{ r.turn_id }}{% if r.merged_user_turn_ids %}<br><span class="muted">merged {{ r.merged_user_turn_ids | join(', ') }}</span>{% endif %}</td>
         <td>{{ r.user_text }}</td>
         <td>{{ r.assistant_text }}</td>
         <td>{{ r.detected_language or '—' }}</td>

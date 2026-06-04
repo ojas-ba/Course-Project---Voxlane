@@ -21,10 +21,11 @@ idempotent — a second call never schedules a duplicate connect.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from loguru import logger
-from pipecat.frames.frames import CancelFrame, EndFrame, ErrorFrame, StartFrame
+from pipecat.frames.frames import CancelFrame, EndFrame, ErrorFrame, Frame, StartFrame
 from pipecat.services.deepgram.flux.base import DeepgramFluxSTTBase
 from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 
@@ -36,6 +37,7 @@ class DeferredConnectDeepgramFluxSTTService(DeepgramFluxSTTService):
         super().__init__(*args, **kwargs)
         self._deferred_connect_task: Any | None = None
         self._deferred_started: bool = False
+        self._warned_early_audio: bool = False
 
     async def start(self, frame: StartFrame) -> None:
         # Invoke DeepgramFluxSTTBase.start's *setup* without its trailing blocking
@@ -75,3 +77,16 @@ class DeferredConnectDeepgramFluxSTTService(DeepgramFluxSTTService):
         if task is not None and not task.done():
             logger.info("Cancelling pending deferred Flux STT connect")
             await self.cancel_task(task)
+
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
+        # The base safely drops audio while the socket isn't open, but silently.
+        # Log once so the narrow "greeting unmuted before Flux connected" window
+        # is visible during live validation rather than looking like dead STT.
+        if not self._transport_is_active() and not self._warned_early_audio:
+            self._warned_early_audio = True
+            logger.warning(
+                "Deferred Flux STT: user audio arrived before the websocket was "
+                "ready; dropping until connected (expected only briefly after the greeting)"
+            )
+        async for frame in super().run_stt(audio):
+            yield frame

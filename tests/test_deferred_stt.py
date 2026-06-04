@@ -175,3 +175,18 @@ def test_stop_cancels_pending_deferred_connect():
             cdc.assert_awaited_once()
 
     asyncio.run(run())
+
+
+def test_audio_before_connect_is_dropped_and_warned_once():
+    svc = _make_service()
+    assert svc._websocket is None          # not connected yet
+    assert svc._warned_early_audio is False
+
+    async def drain():
+        return [f async for f in svc.run_stt(b"\x00\x00")]
+
+    assert asyncio.run(drain()) == []       # base drops audio when not connected
+    assert svc._warned_early_audio is True  # warned exactly once
+    # A second early frame must not raise and must not reset the warning flag.
+    assert asyncio.run(drain()) == []
+    assert svc._warned_early_audio is True

@@ -86,12 +86,14 @@ def build_config_snapshot(
 
     config = get_cached_runtime_config()
     if config is None:
-        # In production the cache is populated at startup (and startup fails hard
-        # if Mongo is down), so this path should only occur in tests/degraded
-        # setups. Make it visible rather than silently serving a default.
-        logger.warning(
-            "build_config_snapshot: no cached runtime config; using canonical "
-            "default. (Expected only in tests / before startup seeding.)"
+        # Startup REQUIRES Mongo and seeds the cache, so for a real call this is
+        # never None. If it is, something is wrong — log loudly (ERROR) rather
+        # than silently serving a default. Outbound calls never reach here: they
+        # load config live and refuse to dial on failure (see dashboard.py).
+        logger.error(
+            "build_config_snapshot: no cached runtime config; falling back to the "
+            "canonical default. This should only happen in tests / before startup "
+            "seeding — a real call hitting this means Mongo seeding did not run."
         )
         config = RuntimeConfig.default(settings)
     return cast(ConfigSnapshot, build_effective_snapshot(config))

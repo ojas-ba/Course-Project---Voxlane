@@ -11,14 +11,20 @@ a background task, letting ``StartFrame`` (and the greeting) flow straight to TT
 while Flux connects. The user is muted through the greeting, and ``run_stt``
 already drops audio safely if any arrives before the socket is open, so nothing
 is lost. Selected via the ``stt.defer_connect_on_start`` runtime-config flag.
+
+Lifecycle: the background connect is tracked and cancelled on stop/cancel so it
+never outlives the call. Intentional cancellation is swallowed (no spurious
+ErrorFrame); only a real connect failure surfaces an ErrorFrame. ``start()`` is
+idempotent — a second call never schedules a duplicate connect.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from loguru import logger
-from pipecat.frames.frames import ErrorFrame, StartFrame
+from pipecat.frames.frames import CancelFrame, EndFrame, ErrorFrame, StartFrame
 from pipecat.services.deepgram.flux.base import DeepgramFluxSTTBase
 from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 
@@ -29,18 +35,43 @@ class DeferredConnectDeepgramFluxSTTService(DeepgramFluxSTTService):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._deferred_connect_task: Any | None = None
+        self._deferred_started: bool = False
 
     async def start(self, frame: StartFrame) -> None:
         # Invoke DeepgramFluxSTTBase.start's *setup* without its trailing blocking
         # ``await self._connect()`` by calling its super() directly, then connect
         # in the background so StartFrame propagation is not blocked.
         await super(DeepgramFluxSTTBase, self).start(frame)
+        if self._deferred_started:
+            logger.debug("Deferred Flux STT already started; not scheduling another connect")
+            return
+        self._deferred_started = True
+        logger.info("Deferred Flux STT connect starting in background")
         self._deferred_connect_task = self.create_task(self._background_connect())
+
+    async def stop(self, frame: EndFrame) -> None:
+        await self._cancel_deferred_connect()
+        await super().stop(frame)
+
+    async def cancel(self, frame: CancelFrame) -> None:
+        await self._cancel_deferred_connect()
+        await super().cancel(frame)
 
     async def _background_connect(self) -> None:
         try:
             await self._connect()
             logger.info("Deferred Flux STT connect completed (ready for audio)")
-        except Exception as exc:  # surface clearly; the call can still degrade gracefully
+        except asyncio.CancelledError:
+            # Intentional shutdown — do NOT surface an ErrorFrame.
+            logger.info("Deferred Flux STT connect cancelled during shutdown")
+            raise
+        except Exception as exc:  # a real connect failure must surface clearly
             logger.error("Deferred Flux STT connect failed: {err}", err=str(exc))
             await self.push_error_frame(ErrorFrame(f"Deepgram Flux STT connect failed: {exc}"))
+
+    async def _cancel_deferred_connect(self) -> None:
+        task = self._deferred_connect_task
+        self._deferred_connect_task = None
+        if task is not None and not task.done():
+            logger.info("Cancelling pending deferred Flux STT connect")
+            await self.cancel_task(task)

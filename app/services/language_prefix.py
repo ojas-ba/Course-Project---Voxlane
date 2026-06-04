@@ -20,6 +20,15 @@ This processor sits between the LLM and Cartesia TTS. It:
 If the tag is missing/malformed it falls back (last response language → STT
 hint → English), records ``error_stage="language_prefix_parse"``, and still
 speaks the text — it never stalls the turn or calls the LLM again.
+
+Package assumptions (verified against the installed Pipecat 1.2.1):
+  * ``CerebrasLLMService`` subclasses ``OpenAILLMService``, whose streaming text
+    path emits ``LLMTextFrame`` (``llm_service._push_llm_text`` →
+    ``LLMTextFrame``). That is the frame this processor intercepts.
+  * ``TTSService`` *consumes* the input ``TextFrame`` (it does not forward it) and
+    appends its own spoken ``TTSTextFrame`` to the assistant context. So the tag
+    MUST be stripped before TTS — doing so keeps it out of both the audio and the
+    LLM context automatically.
 """
 
 from __future__ import annotations
@@ -42,11 +51,14 @@ from app.services.language import (
     fallback_response_language,
     new_language_state,
     record_response_language,
+    sanitize_prefix_fallback_text,
     to_language_enum,
     try_parse_language_prefix,
 )
 
 _PREFIX_ERROR_STAGE = "language_prefix_parse"
+# Spoken only when a malformed/empty reply leaves nothing safe to say.
+_SAFE_REPEAT_LINE = "Sorry, could you repeat that?"
 
 
 class LanguagePrefixProcessor(FrameProcessor):
@@ -118,13 +130,21 @@ class LanguagePrefixProcessor(FrameProcessor):
             )
             await self._resolve_prefix(language, remainder, direction)
 
+        # A malformed/empty reply may sanitize down to nothing speakable — say a
+        # short safe line rather than going silent.
+        if self._prefix_error and not self._spoken_parts:
+            await self._emit_spoken(_SAFE_REPEAT_LINE, direction)
+
         if self._metrics is not None:
-            self._metrics.note_assistant_text("".join(self._spoken_parts).strip())
+            # Record the error BEFORE the assistant text: note_assistant_text is
+            # the finalize signal, and a later note_error would no-op on an
+            # already-emitted record (P1-1).
             if self._prefix_error:
                 self._metrics.note_error(
                     stage=self._prefix_error,
                     message="LLM reply missing/malformed <en>/<hi> tag; used fallback language.",
                 )
+            self._metrics.note_assistant_text("".join(self._spoken_parts).strip())
 
     async def _resolve_prefix(
         self, language: str | None, remainder: str, direction: FrameDirection
@@ -132,6 +152,8 @@ class LanguagePrefixProcessor(FrameProcessor):
         if language is None:
             language = fallback_response_language(get_session_language_state(self._call_sid))
             self._prefix_error = _PREFIX_ERROR_STAGE
+            # On fallback the remainder may carry a malformed tag fragment; clean it.
+            remainder = sanitize_prefix_fallback_text(remainder)
         self._prefix_done = True
         await self._apply_language(language, direction)
         await self._emit_spoken(remainder, direction)
@@ -139,13 +161,19 @@ class LanguagePrefixProcessor(FrameProcessor):
     async def _apply_language(self, language: str, direction: FrameDirection) -> None:
         state = get_session_language_state(self._call_sid) or new_language_state()
         record_response_language(state, language)
+        # Only switch Cartesia when the language actually changes. The first
+        # response always emits (last_tts_language is unset); thereafter a repeat
+        # of the same language is a no-op, avoiding per-turn TTS context churn.
+        changed = state.get("last_tts_language") != language
+        state["last_tts_language"] = language
         set_session_language_state(self._call_sid, state)
 
-        enum = to_language_enum(language)
-        if enum is not None:
-            await self.push_frame(
-                TTSUpdateSettingsFrame(delta=CartesiaTTSSettings(language=enum)), direction
-            )
+        if changed:
+            enum = to_language_enum(language)
+            if enum is not None:
+                await self.push_frame(
+                    TTSUpdateSettingsFrame(delta=CartesiaTTSSettings(language=enum)), direction
+                )
         if self._metrics is not None:
             self._metrics.note_language(
                 detected_language=state.get("last_user_language"),

@@ -149,6 +149,24 @@ def language_hint_line(state: dict[str, Any] | None) -> str:
 _PREFIX_RE = re.compile(r"\s*<(en|hi)>", re.IGNORECASE)
 _PREFIX_CANDIDATES = ("<en>", "<hi>")
 
+# Strips a leading, well-formed-ish ``<...>`` fragment (used ONLY on the fallback
+# path, so a malformed tag like ``<eng>`` / ``<<en>>`` is never spoken).
+_FALLBACK_TAGLIKE_RE = re.compile(r"^\s*<[^>]{0,12}>\s*")
+
+
+def sanitize_prefix_fallback_text(text: str) -> str:
+    """Clean a malformed ``<...>`` control fragment off fallback spoken text.
+
+    Narrow by design (not a parser): strips one leading ``<...>`` token, then any
+    stray leading angle brackets, so the result never begins with ``<``/``>`` and
+    never carries an obvious tag fragment to TTS. May return "" (caller then
+    speaks a short safe line). Well-formed ``<en>``/``<hi>`` tags are handled
+    upstream and never reach here.
+    """
+    cleaned = _FALLBACK_TAGLIKE_RE.sub("", text or "")
+    cleaned = cleaned.lstrip("<> \t\r\n")
+    return cleaned.strip()
+
 
 def try_parse_language_prefix(
     buffer: str, *, max_prefix_chars: int = LANGUAGE_PREFIX_MAX_CHARS

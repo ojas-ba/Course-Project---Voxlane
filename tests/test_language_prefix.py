@@ -2,7 +2,9 @@
 
 import asyncio
 
+import pytest
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
@@ -10,10 +12,13 @@ from pipecat.frames.frames import (
     TTSSpeakFrame,
     TTSUpdateSettingsFrame,
 )
+from pipecat.observers.base_observer import FramePushed
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.transcriptions.language import Language
 
 from app.runtime import ACTIVE_SESSIONS
+from app.services.call_metrics import TurnMetricsObserver
+from app.services.language import new_language_state
 from app.services.language_prefix import LanguagePrefixProcessor
 
 
@@ -168,3 +173,102 @@ def test_greeting_ttsspeak_passes_through_untouched():
     greeting = TTSSpeakFrame("Hello, you're connected.")
     asyncio.run(_run(proc, [greeting]))
     assert captured == [greeting]  # forwarded unchanged, not intercepted
+
+
+# --- P2-2: malformed tags must never be spoken --------------------------------
+
+@pytest.mark.parametrize("raw,banned", [
+    ("<eng> hello there", "<eng>"),
+    ("<<en>> hello there", "<<en>"),
+    ("<hi hello there", None),
+    ("<en", None),
+])
+def test_malformed_prefix_is_not_spoken(raw, banned):
+    m = _FakeMetrics()
+    proc, captured = _make(metrics=m)
+    asyncio.run(_run(proc, [
+        LLMFullResponseStartFrame(),
+        LLMTextFrame(raw),
+        LLMFullResponseEndFrame(),
+    ]))
+    spoken = _spoken(captured)
+    assert not spoken.startswith("<") and not spoken.startswith(">")
+    assert "<en>" not in spoken and "<hi>" not in spoken
+    if banned:
+        assert banned not in spoken
+    _, lang_enum = _tts_lang_index(captured)        # fallback still routes a language
+    assert lang_enum in (Language.EN, Language.HI)
+    assert m.errors and m.errors[0][0] == "language_prefix_parse"
+
+
+# --- P2-3: TTS language update only when the language changes ------------------
+
+def test_tts_language_update_deduplicated_across_turns():
+    call_sid = "c_dedup"
+    ACTIVE_SESSIONS[call_sid] = {
+        "call_sid": call_sid, "stream_sid": "s", "metrics": {}, "transcript": [],
+        "first_latency": None, "config_snapshot": {}, "language_state": new_language_state(),
+    }
+    try:
+        proc = LanguagePrefixProcessor(call_sid=call_sid, metrics_observer=None)
+        captured: list = []
+
+        async def cap(frame, direction=FrameDirection.DOWNSTREAM):
+            captured.append(frame)
+
+        proc.push_frame = cap  # type: ignore[method-assign]
+
+        def updates():
+            return [f for f in captured if isinstance(f, TTSUpdateSettingsFrame)]
+
+        def turn(tag_text):
+            asyncio.run(_run(proc, [
+                LLMFullResponseStartFrame(), LLMTextFrame(tag_text), LLMFullResponseEndFrame(),
+            ]))
+
+        turn("<en> one");   assert len(updates()) == 1   # first turn always emits
+        turn("<en> two");   assert len(updates()) == 1   # same language -> no new emit
+        turn("<hi> teen");  assert len(updates()) == 2   # change -> emit
+        turn("<hi> chaar"); assert len(updates()) == 2   # same -> no emit
+        turn("<en> five");  assert len(updates()) == 3   # change back -> emit
+    finally:
+        ACTIVE_SESSIONS.pop(call_sid, None)
+
+
+# --- P1-1: prefix-parse error survives audio-before-LLM-end (integration) ------
+
+def _fp(frame):
+    return FramePushed(
+        source=None, destination=None, frame=frame,
+        direction=FrameDirection.DOWNSTREAM, timestamp=0,
+    )
+
+
+def test_prefix_parse_error_survives_audio_before_llm_end():
+    """LanguagePrefixProcessor + TurnMetricsObserver: when bot audio starts before
+    the LLM stream ends, the emitted record must still carry BOTH error_stage and
+    the spoken text (regresses P1-1 in either file)."""
+    out: list = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    proc = LanguagePrefixProcessor(call_sid="c_p11", metrics_observer=obs)
+    captured: list = []
+
+    async def cap(frame, direction=FrameDirection.DOWNSTREAM):
+        captured.append(frame)
+
+    proc.push_frame = cap  # type: ignore[method-assign]
+
+    async def scenario():
+        obs.note_user_turn(turn_id=1, user_text="hi", stt_eot_received_at=1.0, turn_committed_at=1.0)
+        await obs.on_push_frame(_fp(LLMFullResponseStartFrame()))           # promote
+        await proc.process_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
+        await proc.process_frame(LLMTextFrame("Hello, I forgot the tag."), FrameDirection.DOWNSTREAM)
+        await obs.on_push_frame(_fp(BotStartedSpeakingFrame()))             # audio FIRST
+        await obs.on_push_frame(_fp(LLMFullResponseEndFrame()))             # timing only
+        assert out == []                                                   # not finalized yet
+        await proc.process_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)  # parser finishes
+
+    asyncio.run(scenario())
+    assert len(out) == 1
+    assert out[0]["error_stage"] == "language_prefix_parse"
+    assert out[0]["assistant_text"] == "Hello, I forgot the tag."

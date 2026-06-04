@@ -87,3 +87,16 @@ def test_detect_from_transcription_normalizes():
 def test_policy_mentions_both_tags():
     assert "<en>" in lang.RESPONSE_LANGUAGE_POLICY
     assert "<hi>" in lang.RESPONSE_LANGUAGE_POLICY
+
+
+def test_sanitize_prefix_fallback_strips_malformed_tags():
+    assert lang.sanitize_prefix_fallback_text("<eng> hello") == "hello"
+    assert lang.sanitize_prefix_fallback_text("<<en>> hello") == "hello"
+    no_close = lang.sanitize_prefix_fallback_text("<hi hello")
+    assert not no_close.startswith("<") and "hello" in no_close
+    truncated = lang.sanitize_prefix_fallback_text("<en")
+    assert not truncated.startswith("<") and not truncated.startswith(">")
+    # Text without a tag is left intact.
+    assert lang.sanitize_prefix_fallback_text("Hello there") == "Hello there"
+    # Pure bracket junk collapses to empty (caller then speaks a safe line).
+    assert lang.sanitize_prefix_fallback_text("<>") == ""

@@ -75,3 +75,17 @@ def test_pipeline_order_has_prefix_between_llm_and_tts():
     # AFTER transport.output() [8].
     assert procs[4] is not procs[9]
     assert procs[8] is transport.output.return_value
+
+
+def test_user_muted_until_first_bot_complete_during_greeting():
+    # Greeting-phase safety (makes deferred STT safe): the caller is muted until
+    # the opening greeting completes, so early audio can't create a turn.
+    from pipecat.turns.user_mute import (
+        AlwaysUserMuteStrategy,
+        MuteUntilFirstBotCompleteUserMuteStrategy,
+    )
+    from app.services.pipecat_pipeline import _user_mute_strategies
+
+    types = {type(s) for s in _user_mute_strategies()}
+    assert MuteUntilFirstBotCompleteUserMuteStrategy in types
+    assert AlwaysUserMuteStrategy in types

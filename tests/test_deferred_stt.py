@@ -3,6 +3,7 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from pipecat.services.deepgram.flux.base import DeepgramFluxSTTBase
 
 from app.config import get_settings
@@ -92,3 +93,85 @@ def test_background_connect_failure_is_surfaced_as_error_frame():
 
     asyncio.run(run())
     assert errs, "a connect failure should push an ErrorFrame"
+
+
+# --- L-4: lifecycle hardening -------------------------------------------------
+
+def test_double_start_schedules_connect_only_once():
+    svc = _make_service()
+    grandparent = _grandparent(svc)
+    futs: list = []
+
+    def fake_create_task(coro, *a, **k):
+        f = asyncio.ensure_future(coro)
+        futs.append(f)
+        return f
+
+    async def noop_bg():
+        return None
+
+    async def run():
+        with patch.object(grandparent, "start", new_callable=AsyncMock), \
+             patch.object(svc, "_background_connect", noop_bg), \
+             patch.object(svc, "create_task", side_effect=fake_create_task):
+            await svc.start(MagicMock())
+            await svc.start(MagicMock())   # second start must NOT schedule again
+            assert len(futs) == 1
+        for f in futs:
+            await f
+
+    asyncio.run(run())
+
+
+def test_cancel_deferred_connect_cancels_pending_task():
+    svc = _make_service()
+
+    async def run():
+        async def slow():
+            await asyncio.Event().wait()  # never completes on its own
+
+        task = asyncio.ensure_future(slow())
+        svc._deferred_connect_task = task
+
+        async def fake_cancel_task(t, timeout=None):
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+
+        with patch.object(svc, "cancel_task", fake_cancel_task):
+            await svc._cancel_deferred_connect()
+        assert task.cancelled()
+        assert svc._deferred_connect_task is None
+
+    asyncio.run(run())
+
+
+def test_background_connect_cancelled_does_not_push_error_frame():
+    svc = _make_service()
+    errs: list = []
+
+    async def cancelled_connect():
+        raise asyncio.CancelledError()
+
+    async def run():
+        with patch.object(svc, "_connect", cancelled_connect), \
+             patch.object(svc, "push_error_frame", new=AsyncMock(side_effect=lambda f: errs.append(f))):
+            with pytest.raises(asyncio.CancelledError):
+                await svc._background_connect()
+
+    asyncio.run(run())
+    assert errs == [], "intentional cancellation must not surface an ErrorFrame"
+
+
+def test_stop_cancels_pending_deferred_connect():
+    svc = _make_service()
+
+    async def run():
+        with patch.object(svc, "_cancel_deferred_connect", new_callable=AsyncMock) as cdc, \
+             patch.object(DeepgramFluxSTTBase, "stop", new_callable=AsyncMock):
+            await svc.stop(MagicMock())
+            cdc.assert_awaited_once()
+
+    asyncio.run(run())

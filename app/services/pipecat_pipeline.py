@@ -164,14 +164,26 @@ def _build_context(snapshot: ConfigSnapshot) -> LLMContext:
     )
 
 
+def _user_mute_strategies() -> list[Any]:
+    """User-aggregator mute strategies (greeting-phase audio safety).
+
+    ``MuteUntilFirstBotComplete`` keeps the caller muted until the opening
+    greeting finishes, so early user audio cannot create a misleading turn and
+    STT need not be connected during the greeting — this is precisely what makes
+    the deferred Flux STT connect safe. ``AlwaysUserMute`` then mutes the caller
+    whenever the bot is speaking.
+    """
+    return [
+        MuteUntilFirstBotCompleteUserMuteStrategy(),
+        AlwaysUserMuteStrategy(),
+    ]
+
+
 def _build_aggregator_pair(context: LLMContext) -> LLMContextAggregatorPair:
     user_params = LLMUserAggregatorParams(
         user_turn_strategies=ExternalUserTurnStrategies(),
         vad_analyzer=SileroVADAnalyzer(sample_rate=V1_SAMPLE_RATE),
-        user_mute_strategies=[
-            MuteUntilFirstBotCompleteUserMuteStrategy(),
-            AlwaysUserMuteStrategy(),
-        ],
+        user_mute_strategies=_user_mute_strategies(),
     )
     return LLMContextAggregatorPair(context=context, user_params=user_params)
 

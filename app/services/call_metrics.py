@@ -188,7 +188,11 @@ class TurnMetricsObserver(BaseObserver):
             return
         audio_seen = rec["first_audio_frame_sent_at"] is not None
         llm_started = rec["llm_request_started_at"] is not None
-        llm_noted = rec.get("_llm_response_noted", False) or rec["llm_completed_at"] is not None
+        # The parser's note_assistant_text is the authoritative "response done"
+        # signal — NOT the raw LLMFullResponseEndFrame. Finalizing on the frame
+        # would race ahead of note_error/note_assistant_text and drop both the
+        # error_stage and the spoken text on streamed replies (P1-1).
+        llm_noted = rec.get("_llm_response_noted", False)
         if audio_seen and (llm_noted or not llm_started):
             self._open = None
             self._emit(rec)

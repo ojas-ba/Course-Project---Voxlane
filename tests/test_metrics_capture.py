@@ -141,3 +141,18 @@ def test_flush_emits_pending_turn_on_call_end():
     _push(obs, EndFrame())
     assert len(out) == 1
     assert out[0]["error_stage"] == "no_bot_response"
+
+
+def test_end_frame_alone_does_not_finalize_before_parser_note():
+    # P1-1 guard: LLMFullResponseEndFrame is timing only; the record must wait
+    # for the parser's note_assistant_text even if audio already arrived.
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    obs.note_user_turn(turn_id=1, user_text="x", stt_eot_received_at=1.0, turn_committed_at=1.0)
+    _push(obs, LLMFullResponseStartFrame())
+    _push(obs, BotStartedSpeakingFrame())   # audio first
+    _push(obs, LLMFullResponseEndFrame())   # end frame alone must NOT finalize
+    assert out == []
+    obs.note_assistant_text("done")          # parser signal finalizes
+    assert len(out) == 1
+    assert out[0]["assistant_text"] == "done"

@@ -239,12 +239,14 @@ class MemoryProcessor(FrameProcessor):
         context: LLMContext,
         base_system_prompt: str,
         memory_cfg: dict[str, Any],
+        metrics_observer: Any | None = None,
     ) -> None:
         super().__init__()
         self._call_sid = call_sid
         self._context = context
         self._base_system = base_system_prompt
         self._cfg = memory_cfg
+        self._metrics = metrics_observer
 
     async def process_frame(
         self, frame: Any, direction: FrameDirection = FrameDirection.DOWNSTREAM
@@ -255,7 +257,14 @@ class MemoryProcessor(FrameProcessor):
             and isinstance(frame, TranscriptionFrame)
             and getattr(frame, "finalized", False)
         ):
+            started = time.perf_counter()
             self._govern_context(frame.text or "")
+            duration_ms = round((time.perf_counter() - started) * 1000.0, 2)
+            if self._metrics is not None:
+                self._metrics.note_memory_timing(
+                    duration_ms=duration_ms,
+                    context_message_count=len(self._context.messages),
+                )
         await self.push_frame(frame, direction)
 
     def _govern_context(self, user_text: str) -> None:
@@ -319,6 +328,7 @@ def _build_pipeline_processors(
         context=context,
         base_system_prompt=snapshot["SYSTEM_PROMPT"],
         memory_cfg=(snapshot.get("runtime_config") or {}).get("memory") or {},
+        metrics_observer=metrics_observer,
     )
     language_prefix = LanguagePrefixProcessor(
         call_sid=call_sid, metrics_observer=metrics_observer
@@ -337,6 +347,18 @@ def _build_pipeline_processors(
             turn = result.turn
             if turn is None:
                 return
+            lstate = get_session_language_state(call_sid) or {}
+            # STT must be connected to have produced this EOT; the meaningful
+            # signal is whether early audio was dropped before connect.
+            stt_ready = not getattr(service, "_warned_early_audio", False)
+            logger.info(
+                "Flux end_of_turn",
+                call_sid=call_sid,
+                turn_id=turn.turn_index,
+                detected_language=lstate.get("last_user_language"),
+                stt_ready=stt_ready,
+                transcript=_normalize_transcript_text(turn.text)[:160],
+            )
             append_session_transcript_event(
                 call_sid, role="user", phase="task",
                 text=_normalize_transcript_text(turn.text),
@@ -346,9 +368,26 @@ def _build_pipeline_processors(
                 user_text=turn.text,
                 stt_eot_received_at=now,
                 turn_committed_at=time.time(),
+                stt_ready=stt_ready,
             )
             # Language is annotated by the LanguagePrefixProcessor (from the LLM
             # tag) and resolved at metric finalize, so it is not read here.
+
+        # Lightweight visibility into Flux's turn-boundary decisions. These are
+        # diagnostic only (DEBUG) — no behavior change, no EOT tuning. They help
+        # explain incomplete-utterance turns caused by eot_timeout firing mid-speech.
+        @stt.event_handler("on_start_of_turn")
+        async def _on_start_of_turn(service: Any, *args: Any) -> None:
+            logger.debug("Flux start_of_turn", call_sid=call_sid)
+
+        @stt.event_handler("on_eager_end_of_turn")
+        async def _on_eager_end_of_turn(service: Any, *args: Any) -> None:
+            preview = _normalize_transcript_text(str(args[0]))[:80] if args else ""
+            logger.debug("Flux eager_end_of_turn", call_sid=call_sid, transcript=preview)
+
+        @stt.event_handler("on_turn_resumed")
+        async def _on_turn_resumed(service: Any, *args: Any) -> None:
+            logger.debug("Flux turn_resumed", call_sid=call_sid)
 
     return [
         transport.input(),

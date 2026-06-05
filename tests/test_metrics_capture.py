@@ -2,6 +2,7 @@ import asyncio
 
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     EndFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -122,6 +123,95 @@ def test_emit_computes_breakdown():
     assert r["llm_ttfb_ms"] == round((100.7 - 100.4) * 1000, 1)
     assert r["llm_total_ms"] == round((101.0 - 100.4) * 1000, 1)
     assert r["tts_first_audio_ms"] == round((101.2 - 101.05) * 1000, 1)
+    # New stage-breakdown deltas (the segments that localize a slow turn).
+    assert r["user_stop_to_eot_ms"] == round((100.3 - 100.0) * 1000, 1)
+    assert r["eot_to_turn_committed_ms"] == round((100.35 - 100.3) * 1000, 1)
+    assert r["user_stop_to_llm_start_ms"] == round((100.4 - 100.0) * 1000, 1)
+    assert r["turn_committed_to_llm_start_ms"] == round((100.4 - 100.35) * 1000, 1)
+    assert r["llm_end_to_tts_start_ms"] == round((101.05 - 101.0) * 1000, 1)
+    assert r["user_stop_to_first_audio_ms"] == round((101.2 - 100.0) * 1000, 1)
+    assert r["earliest_user_stop_to_first_audio_ms"] == r["user_stop_to_first_audio_ms"]
+    assert r["latest_user_stop_to_first_audio_ms"] == r["user_stop_to_first_audio_ms"]
+
+
+def test_delayed_llm_start_surfaces_in_committed_to_llm_start():
+    # A 12s gap between turn-commit and the LLM starting must be visible as the
+    # committed_to_llm_start / user_stop_to_llm_start deltas, NOT hidden.
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    rec = {
+        "turn_id": 1, "user_text": "x", "assistant_text": "y",
+        "detected_language": "en", "response_language": "en",
+        "user_stopped_speaking_at": 10.0, "user_stopped_is_eot_fallback": False,
+        "stt_eot_received_at": 10.001, "turn_committed_at": 10.002,
+        "llm_request_started_at": 22.0, "llm_first_token_or_text_at": 22.5,
+        "llm_completed_at": 22.6, "tts_request_started_at": 22.63,
+        "first_audio_frame_sent_at": 22.7, "error_stage": None, "error_message": None,
+    }
+    obs._emit(rec)
+    r = out[0]
+    assert r["turn_committed_to_llm_start_ms"] == round((22.0 - 10.002) * 1000, 1)  # ~11998
+    assert r["user_stop_to_llm_start_ms"] == round((22.0 - 10.0) * 1000, 1)         # 12000
+    assert r["llm_ttfb_ms"] == round((22.5 - 22.0) * 1000, 1)                       # 500 (LLM was fine)
+
+
+def test_merged_turn_stores_earliest_latest_and_subturns():
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    _push(obs, UserStoppedSpeakingFrame())
+    obs.note_user_turn(turn_id=3, user_text="Hello.", stt_eot_received_at=1.0, turn_committed_at=1.0)
+    _push(obs, UserStoppedSpeakingFrame())
+    obs.note_user_turn(turn_id=4, user_text="Computer science.", stt_eot_received_at=2.0, turn_committed_at=2.0)
+    _push(obs, LLMFullResponseStartFrame())
+    _push(obs, LLMTextFrame("<en> ok"))
+    _push(obs, LLMFullResponseEndFrame())
+    obs.note_assistant_text("Got it.")
+    _push(obs, BotStartedSpeakingFrame())
+
+    rec = out[0]
+    assert rec["merged_user_turn_ids"] == [3, 4]
+    assert rec["merged_user_texts"] == ["Hello.", "Computer science."]
+    assert len(rec["merged_user_stop_times"]) == 2
+    assert rec["earliest_user_stop_to_first_audio_ms"] is not None
+    assert rec["latest_user_stop_to_first_audio_ms"] is not None
+    # The latest sub-stop is later, so its latency is <= the earliest-anchored one.
+    assert rec["latest_user_stop_to_first_audio_ms"] <= rec["earliest_user_stop_to_first_audio_ms"]
+
+
+def test_bot_was_speaking_when_user_stopped_flag():
+    obs = TurnMetricsObserver(on_record=lambda r: None)
+    _push(obs, BotStartedSpeakingFrame())   # bot is speaking
+    _push(obs, UserStoppedSpeakingFrame())  # ...user stops while it speaks
+    obs.note_user_turn(turn_id=1, user_text="x", stt_eot_received_at=1.0, turn_committed_at=1.0)
+    assert obs._pending_turns[0]["bot_was_speaking_when_user_stopped"] is True
+
+
+def test_bot_not_speaking_when_user_stopped_flag():
+    obs = TurnMetricsObserver(on_record=lambda r: None)
+    _push(obs, BotStartedSpeakingFrame())
+    _push(obs, BotStoppedSpeakingFrame())   # bot finished
+    _push(obs, UserStoppedSpeakingFrame())
+    obs.note_user_turn(turn_id=1, user_text="x", stt_eot_received_at=1.0, turn_committed_at=1.0)
+    assert obs._pending_turns[0]["bot_was_speaking_when_user_stopped"] is False
+
+
+def test_memory_duration_attached_to_turn():
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    obs.note_memory_timing(duration_ms=12.5, context_message_count=7)
+    obs.note_user_turn(turn_id=1, user_text="x", stt_eot_received_at=1.0, turn_committed_at=1.0)
+    _push(obs, LLMFullResponseStartFrame())
+    _push(obs, LLMFullResponseEndFrame())
+    obs.note_assistant_text("ok")
+    _push(obs, BotStartedSpeakingFrame())
+    assert out[0]["memory_processor_duration_ms"] == 12.5
+    assert out[0]["context_message_count"] == 7
+
+
+def test_stt_ready_flag_persisted():
+    obs = TurnMetricsObserver(on_record=lambda r: None)
+    obs.note_user_turn(turn_id=1, user_text="x", stt_eot_received_at=1.0, turn_committed_at=1.0, stt_ready=False)
+    assert obs._pending_turns[0]["stt_ready_before_user_turn"] is False
 
 
 def test_note_user_turn_queues_pending_not_open():

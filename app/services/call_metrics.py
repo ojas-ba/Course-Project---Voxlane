@@ -3,23 +3,27 @@
 An observer (not a pipeline processor) is used because it sees every frame push
 regardless of pipeline position, which is required to time STT->LLM->TTS across
 the graph. The side channel (Flux ``on_end_of_turn``) opens a turn record; the
-``LanguagePrefixProcessor`` annotates the spoken text + chosen language; this
-observer fills the timing fields and finalizes the record.
+``LanguagePrefixProcessor`` annotates the spoken text + chosen language; the
+``MemoryProcessor`` reports its own duration; this observer fills the timing
+fields and finalizes the record.
 
-Two correctness properties this file guarantees:
+Correctness properties:
 
-  * **Assistant text is parser-fed, never frame-scraped.** The raw LLM text
-    carries the ``<en>``/``<hi>`` tag, so ``assistant_text`` comes only from
-    ``note_assistant_text`` (called by the prefix processor with the clean
-    spoken text). ``LLMTextFrame`` is used solely for first-token *timing*.
+  * **Assistant text is parser-fed, never frame-scraped** — ``assistant_text``
+    comes only from ``note_assistant_text`` (the raw LLM text carries the
+    ``<en>``/``<hi>`` tag). ``LLMTextFrame`` is used solely for first-token timing.
+  * **Overlapping user turns are merged, never overwritten** — both turns are
+    queued and merged into one record (``merged_user_turn_ids``).
 
-  * **Overlapping user turns are merged, never overwritten.** If the user
-    speaks again (a second Flux EOT) before the bot's reply starts, both turns
-    are queued and merged into one visible record (``merged_user_turn_ids``)
-    with the earliest user-stop as the latency anchor — no turn ID is dropped.
+Observability goal: every turn record carries enough timestamps to localize a
+slow turn to ONE stage — STT/EOT, commit, the queue *before* the LLM, the LLM,
+the LLM->TTS hand-off, or TTS — plus whether the bot was still speaking and how
+long memory governance took. For merged turns we keep BOTH the earliest and the
+latest user-stop so a long human pause between sub-utterances is distinguishable
+from a real backend stall.
 
 Primary metric (server-side proxy, NOT phone-speaker playback):
-    primary_latency_ms = first_audio_frame_sent_at - user_stopped_speaking_at
+    user_stop_to_first_audio_ms = first_audio_frame_sent_at - user_stopped_speaking_at
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from typing import Any, Callable
 
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     CancelFrame,
     EndFrame,
     LLMFullResponseEndFrame,
@@ -62,6 +67,11 @@ class TurnMetricsObserver(BaseObserver):
         self._pending_turns: list[dict[str, Any]] = []
         self._open: dict[str, Any] | None = None
         self._pending_user_stopped_at: float | None = None
+        self._pending_bot_was_speaking: bool | None = None
+        self._bot_speaking: bool = False
+        # Memory governance timing for the turn currently being assembled.
+        self._pending_memory_duration_ms: float | None = None
+        self._pending_context_message_count: int | None = None
 
     # -- side-channel annotations (called from the pipeline) ----------------
 
@@ -72,6 +82,7 @@ class TurnMetricsObserver(BaseObserver):
         user_text: str,
         stt_eot_received_at: float,
         turn_committed_at: float,
+        stt_ready: bool = True,
     ) -> None:
         """Queue a finalized user turn (awaiting the bot's response to time it)."""
         user_stopped = self._pending_user_stopped_at
@@ -80,7 +91,13 @@ class TurnMetricsObserver(BaseObserver):
             # No VAD UserStoppedSpeakingFrame seen; fall back to the EOT time so
             # primary latency is never silently null.
             user_stopped = stt_eot_received_at
+        bot_was_speaking = (
+            self._pending_bot_was_speaking
+            if self._pending_bot_was_speaking is not None
+            else self._bot_speaking
+        )
         self._pending_user_stopped_at = None
+        self._pending_bot_was_speaking = None
         self._pending_turns.append(
             {
                 "turn_id": turn_id,
@@ -97,6 +114,12 @@ class TurnMetricsObserver(BaseObserver):
                 "llm_completed_at": None,
                 "tts_request_started_at": None,
                 "first_audio_frame_sent_at": None,
+                "bot_started_speaking_at": None,
+                "bot_stopped_speaking_at": None,
+                "bot_was_speaking_when_user_stopped": bool(bot_was_speaking),
+                "stt_ready_before_user_turn": bool(stt_ready),
+                "memory_processor_duration_ms": None,
+                "context_message_count": None,
                 "error_stage": None,
                 "error_message": None,
             }
@@ -119,6 +142,16 @@ class TurnMetricsObserver(BaseObserver):
             self._open["error_stage"] = stage
             self._open["error_message"] = message
 
+    def note_memory_timing(
+        self, *, duration_ms: float | None, context_message_count: int | None = None
+    ) -> None:
+        """Report MemoryProcessor governance time for the next/active turn."""
+        self._pending_memory_duration_ms = duration_ms
+        self._pending_context_message_count = context_message_count
+        if self._open is not None and self._open.get("memory_processor_duration_ms") is None:
+            self._open["memory_processor_duration_ms"] = duration_ms
+            self._open["context_message_count"] = context_message_count
+
     # -- frame observation --------------------------------------------------
 
     async def on_push_frame(self, data: FramePushed) -> None:
@@ -127,8 +160,22 @@ class TurnMetricsObserver(BaseObserver):
         frame = data.frame
         now = time.time()
 
+        # Bot-speaking state is call-level (tracked even with no open turn).
+        if isinstance(frame, BotStartedSpeakingFrame):
+            self._bot_speaking = True
+            if self._open is not None and self._open["first_audio_frame_sent_at"] is None:
+                self._open["first_audio_frame_sent_at"] = now
+                self._open["bot_started_speaking_at"] = now
+                self._try_finalize()
+            return
+        if isinstance(frame, BotStoppedSpeakingFrame):
+            self._bot_speaking = False
+            if self._open is not None and self._open.get("bot_stopped_speaking_at") is None:
+                self._open["bot_stopped_speaking_at"] = now
+            return
         if isinstance(frame, UserStoppedSpeakingFrame):
             self._pending_user_stopped_at = now
+            self._pending_bot_was_speaking = self._bot_speaking
             return
         if isinstance(frame, (EndFrame, CancelFrame)):
             self._flush_incomplete()
@@ -148,10 +195,6 @@ class TurnMetricsObserver(BaseObserver):
         elif isinstance(frame, TTSStartedFrame):
             if self._open["tts_request_started_at"] is None:
                 self._open["tts_request_started_at"] = now
-        elif isinstance(frame, BotStartedSpeakingFrame):
-            if self._open["first_audio_frame_sent_at"] is None:
-                self._open["first_audio_frame_sent_at"] = now
-            self._try_finalize()
 
     # -- record lifecycle ---------------------------------------------------
 
@@ -171,15 +214,25 @@ class TurnMetricsObserver(BaseObserver):
         turns = self._pending_turns
         self._pending_turns = []
         merged = dict(turns[0])
+        stops = [t["user_stopped_speaking_at"] for t in turns if t["user_stopped_speaking_at"] is not None]
+        merged["latest_user_stopped_speaking_at"] = max(stops) if stops else merged["user_stopped_speaking_at"]
         if len(turns) > 1:
-            ids = [t["turn_id"] for t in turns]
-            merged["merged_user_turn_ids"] = ids
+            merged["merged_user_turn_ids"] = [t["turn_id"] for t in turns]
+            merged["merged_user_texts"] = [t["user_text"] for t in turns]
+            merged["merged_user_stop_times"] = stops
             merged["user_text"] = "\n".join(t["user_text"] for t in turns if t["user_text"])
-            stops = [t["user_stopped_speaking_at"] for t in turns if t["user_stopped_speaking_at"] is not None]
             if stops:
-                merged["user_stopped_speaking_at"] = min(stops)
+                merged["user_stopped_speaking_at"] = min(stops)  # earliest = primary anchor
             merged["user_stopped_is_eot_fallback"] = all(t["user_stopped_is_eot_fallback"] for t in turns)
+            merged["bot_was_speaking_when_user_stopped"] = any(
+                t["bot_was_speaking_when_user_stopped"] for t in turns
+            )
         merged["llm_request_started_at"] = now
+        if merged.get("memory_processor_duration_ms") is None:
+            merged["memory_processor_duration_ms"] = self._pending_memory_duration_ms
+            merged["context_message_count"] = self._pending_context_message_count
+        self._pending_memory_duration_ms = None
+        self._pending_context_message_count = None
         self._open = merged
 
     def _try_finalize(self) -> None:
@@ -221,12 +274,28 @@ class TurnMetricsObserver(BaseObserver):
                 rec["detected_language"] = detected
             if rec.get("response_language") is None:
                 rec["response_language"] = response
-        rec["primary_latency_ms"] = _ms(rec["first_audio_frame_sent_at"], rec["user_stopped_speaking_at"])
-        rec["eot_delay_ms"] = _ms(rec["stt_eot_received_at"], rec["user_stopped_speaking_at"])
-        rec["commit_delay_ms"] = _ms(rec["turn_committed_at"], rec["stt_eot_received_at"])
+
+        first_audio = rec["first_audio_frame_sent_at"]
+        earliest_stop = rec["user_stopped_speaking_at"]
+        latest_stop = rec.get("latest_user_stopped_speaking_at", earliest_stop)
+
+        # Stage breakdown — each delta localizes time to ONE segment.
+        rec["user_stop_to_eot_ms"] = _ms(rec["stt_eot_received_at"], earliest_stop)
+        rec["eot_to_turn_committed_ms"] = _ms(rec["turn_committed_at"], rec["stt_eot_received_at"])
+        rec["user_stop_to_llm_start_ms"] = _ms(rec["llm_request_started_at"], earliest_stop)
+        rec["turn_committed_to_llm_start_ms"] = _ms(rec["llm_request_started_at"], rec["turn_committed_at"])
         rec["llm_ttfb_ms"] = _ms(rec["llm_first_token_or_text_at"], rec["llm_request_started_at"])
         rec["llm_total_ms"] = _ms(rec["llm_completed_at"], rec["llm_request_started_at"])
-        rec["tts_first_audio_ms"] = _ms(rec["first_audio_frame_sent_at"], rec["tts_request_started_at"])
+        rec["llm_end_to_tts_start_ms"] = _ms(rec["tts_request_started_at"], rec["llm_completed_at"])
+        rec["tts_first_audio_ms"] = _ms(first_audio, rec["tts_request_started_at"])
+        rec["user_stop_to_first_audio_ms"] = _ms(first_audio, earliest_stop)
+        rec["earliest_user_stop_to_first_audio_ms"] = _ms(first_audio, earliest_stop)
+        rec["latest_user_stop_to_first_audio_ms"] = _ms(first_audio, latest_stop)
+
+        # Back-compat aliases (existing UI/tests).
+        rec["primary_latency_ms"] = rec["user_stop_to_first_audio_ms"]
+        rec["eot_delay_ms"] = rec["user_stop_to_eot_ms"]
+        rec["commit_delay_ms"] = rec["eot_to_turn_committed_ms"]
         try:
             self._on_record(rec)
         except Exception:

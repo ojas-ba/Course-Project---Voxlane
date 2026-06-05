@@ -21,6 +21,7 @@ idempotent — a second call never schedules a duplicate connect.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -38,6 +39,11 @@ class DeferredConnectDeepgramFluxSTTService(DeepgramFluxSTTService):
         self._deferred_connect_task: Any | None = None
         self._deferred_started: bool = False
         self._warned_early_audio: bool = False
+        # Timestamps for correlating greeting latency with STT readiness.
+        self.connect_started_at: float | None = None
+        self.connected_at: float | None = None
+        self.connect_failed_at: float | None = None
+        self.connect_cancelled_at: float | None = None
 
     async def start(self, frame: StartFrame) -> None:
         # Invoke DeepgramFluxSTTBase.start's *setup* without its trailing blocking
@@ -48,6 +54,7 @@ class DeferredConnectDeepgramFluxSTTService(DeepgramFluxSTTService):
             logger.debug("Deferred Flux STT already started; not scheduling another connect")
             return
         self._deferred_started = True
+        self.connect_started_at = time.time()
         logger.info("Deferred Flux STT connect starting in background")
         self._deferred_connect_task = self.create_task(self._background_connect())
 
@@ -62,12 +69,18 @@ class DeferredConnectDeepgramFluxSTTService(DeepgramFluxSTTService):
     async def _background_connect(self) -> None:
         try:
             await self._connect()
-            logger.info("Deferred Flux STT connect completed (ready for audio)")
+            self.connected_at = time.time()
+            elapsed_ms = round((self.connected_at - (self.connect_started_at or self.connected_at)) * 1000.0, 1)
+            logger.info(
+                "Deferred Flux STT connect completed (ready for audio)", connect_ms=elapsed_ms
+            )
         except asyncio.CancelledError:
             # Intentional shutdown — do NOT surface an ErrorFrame.
+            self.connect_cancelled_at = time.time()
             logger.info("Deferred Flux STT connect cancelled during shutdown")
             raise
         except Exception as exc:  # a real connect failure must surface clearly
+            self.connect_failed_at = time.time()
             logger.error("Deferred Flux STT connect failed: {err}", err=str(exc))
             await self.push_error_frame(ErrorFrame(f"Deepgram Flux STT connect failed: {exc}"))
 

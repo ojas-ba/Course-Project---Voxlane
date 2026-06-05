@@ -1,0 +1,36 @@
+{% extends "_base.html" %}
+{% block title %}Voice Agent — Calls{% endblock %}
+{% block content %}
+  <h1>Calls</h1>
+  {% if not db_connected %}<div class="status err">Database not connected — cannot list calls.</div>{% endif %}
+  <p class="muted">Latency = “User Stop → First Audio Sent” (server-side proxy).
+    <span class="badge ok">&lt; 1s</span>
+    <span class="badge warn">1–2s</span>
+    <span class="badge crit">&gt; 2s, or any turn &gt; 3s</span>
+  </p>
+
+  <div class="panel" style="padding:.4rem .2rem;">
+  <table>
+    <thead><tr>
+      <th>Call</th><th>Status</th><th>Turns</th><th>Avg latency</th><th>Max latency</th>
+      <th>Greeting</th><th>Error</th><th>Created</th>
+    </tr></thead>
+    <tbody>
+    {% for log in logs %}
+      <tr>
+        <td><a href="/calls/{{ log.call_sid }}"><code>{{ log.call_sid }}</code></a></td>
+        <td>{{ log.get('conversation_outcome', '—') }}</td>
+        <td>{{ log.turn_count }}</td>
+        <td>{% if log.avg_latency_ms is not none %}<span class="badge {{ log.avg_badge }}">{{ '%.0f ms' % log.avg_latency_ms }}</span>{% else %}—{% endif %}</td>
+        <td>{% if log.max_latency_ms is not none %}<span class="badge {{ log.max_badge }}">{{ '%.0f ms' % log.max_latency_ms }}</span>{% else %}—{% endif %}</td>
+        <td>{{ log.get('metrics', {}).get('greeting_text_source', '—') }}</td>
+        <td>{% if log.get('error') %}<span class="badge crit">yes</span>{% else %}<span class="muted">no</span>{% endif %}</td>
+        <td class="muted">{{ log.created_at }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8"><div class="empty">{% if db_connected %}No calls yet. Place one from the Config page.{% else %}Database not connected.{% endif %}</div></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+{% endblock %}

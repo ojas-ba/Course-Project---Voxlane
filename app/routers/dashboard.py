@@ -120,6 +120,12 @@ def _parse_config_form(form: Any, base: RuntimeConfig) -> RuntimeConfig:
         except (TypeError, ValueError):
             return default
 
+    def b(key: str, default: bool) -> bool:
+        val = form.get(key)
+        if not isinstance(val, str):
+            return default
+        return val.strip().lower() in {"true", "1", "yes", "on"}
+
     hints_raw = s("stt_language_hints", ",".join(base.stt.language_hints))
     hints = [h.strip() for h in hints_raw.split(",") if h.strip()]
 
@@ -129,6 +135,7 @@ def _parse_config_form(form: Any, base: RuntimeConfig) -> RuntimeConfig:
         "language_hints": hints,
         "eot_threshold": f("stt_eot_threshold", base.stt.eot_threshold),
         "eot_timeout_ms": i("stt_eot_timeout_ms", base.stt.eot_timeout_ms),
+        "defer_connect_on_start": b("stt_defer_connect_on_start", base.stt.defer_connect_on_start),
     }
     data["llm"] = {
         "provider": "cerebras",
@@ -146,6 +153,16 @@ def _parse_config_form(form: Any, base: RuntimeConfig) -> RuntimeConfig:
     data["prompt"] = {
         "system_prompt": s("system_prompt", base.prompt.system_prompt),
         "greeting_prompt": s("greeting_prompt", base.prompt.greeting_prompt),
+    }
+    data["memory"] = {
+        **base.memory.model_dump(),
+        "recent_turn_pairs": i("mem_recent_turn_pairs", base.memory.recent_turn_pairs),
+        "enable_running_summary_after_turn": i(
+            "mem_enable_running_summary_after_turn", base.memory.enable_running_summary_after_turn
+        ),
+        "summary_update_every_turns": i(
+            "mem_summary_update_every_turns", base.memory.summary_update_every_turns
+        ),
     }
     data["ops"] = {"debug_log_level": s("debug_log_level", base.ops.debug_log_level)}
     return RuntimeConfig.model_validate(data)
@@ -179,8 +196,8 @@ async def post_config(request: Request) -> HTMLResponse:
 def _outbound_status(request: Request, **ctx: Any) -> HTMLResponse:
     return templates.TemplateResponse(
         request=request,
-        name="config.html",
-        context={"part": "outbound_status", **ctx},
+        name="_outbound_status.html",
+        context=ctx,
     )
 
 
@@ -331,18 +348,32 @@ def _latency_stats(turn_records: list[dict[str, Any]]) -> tuple[float | None, fl
     return round(sum(vals) / len(vals), 1), max(vals)
 
 
+def _badge_class(ms: float | None, *, warn: float, crit: float) -> str:
+    """Latency → badge class. Thresholds live here (UI helper), not in templates."""
+    if ms is None:
+        return "neutral"
+    if ms > crit:
+        return "crit"
+    if ms > warn:
+        return "warn"
+    return "ok"
+
+
 @router.get("/calls", response_class=HTMLResponse)
 async def get_calls_list(request: Request) -> HTMLResponse:
     """Render the completed-calls list with per-call latency stats."""
     logs, db_connected = await _fetch_recent_logs()
     for log in logs:
         records = log.get("metrics", {}).get("turn_records", [])
-        log["avg_latency_ms"], log["max_latency_ms"] = _latency_stats(records)
+        avg, mx = _latency_stats(records)
+        log["avg_latency_ms"], log["max_latency_ms"] = avg, mx
+        log["avg_badge"] = _badge_class(avg, warn=1000, crit=2000)
+        log["max_badge"] = _badge_class(mx, warn=2000, crit=3000)
         log["turn_count"] = log.get("metrics", {}).get("turn_count", len(records))
     return templates.TemplateResponse(
         request=request,
-        name="config.html",
-        context={"part": "logs_list", "logs": logs, "db_connected": db_connected},
+        name="calls.html",
+        context={"logs": logs, "db_connected": db_connected},
     )
 
 

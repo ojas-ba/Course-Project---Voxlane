@@ -25,6 +25,10 @@ def test_config_page_renders(client):
     assert "Runtime Configuration" in response.text
     assert "flux-general-multi" in response.text  # default STT model shown
     assert "Place outbound call" in response.text
+    # Grouped sections + new editable fields with helper text.
+    assert "Defer connect on start" in response.text
+    assert "Memory" in response.text
+    assert "EOT timeout (ms)" in response.text
 
 
 def test_root_renders_config(client):
@@ -107,3 +111,47 @@ def test_call_detail_renders_turn_table(client):
     assert "Hi there!" in response.text
     assert "hello" in response.text
     assert "850 ms" in response.text
+
+
+def test_call_detail_renders_breakdown_merged_and_error(client):
+    fake_log = {
+        "_id": "x",
+        "call_sid": "call_xyz",
+        "stream_sid": "s",
+        "config_snapshot": {"runtime_config": {}},
+        "transcript": [{"role": "assistant", "phase": "greeting", "text": "Hi!"}],
+        "metrics": {
+            "greeting_text_source": "llm",
+            "turn_records": [
+                {
+                    "turn_id": 3, "merged_user_turn_ids": [3, 4],
+                    "merged_user_texts": ["Hello.", "Computer science."],
+                    "merged_user_stop_times": [1.0, 12.0],
+                    "user_text": "Hello.\nComputer science.", "assistant_text": "Samajh gaya.",
+                    "detected_language": "hi", "response_language": "hi",
+                    "user_stop_to_first_audio_ms": 12552.0, "primary_latency_ms": 12552.0,
+                    "user_stop_to_llm_start_ms": 11800.0, "turn_committed_to_llm_start_ms": 11790.0,
+                    "llm_ttfb_ms": 558.0, "llm_total_ms": 592.0, "llm_end_to_tts_start_ms": 30.0,
+                    "tts_first_audio_ms": 114.0, "memory_processor_duration_ms": 3.2,
+                    "earliest_user_stop_to_first_audio_ms": 12552.0,
+                    "latest_user_stop_to_first_audio_ms": 700.0,
+                    "bot_was_speaking_when_user_stopped": False,
+                    "error_stage": "language_prefix_parse", "error_message": "missing tag",
+                }
+            ],
+        },
+    }
+
+    async def _find_one(query):
+        return fake_log
+
+    fake_collection = {"call_logs": type("C", (), {"find_one": staticmethod(_find_one)})()}
+    with patch("app.routers.dashboard.get_database", return_value=fake_collection):
+        response = client.get("/calls/call_xyz")
+
+    assert response.status_code == 200
+    assert "merged 3, 4" in response.text                 # merged ids visible
+    assert "User&#8594;LLM start" in response.text or "User→LLM start" in response.text  # breakdown chip
+    assert "latest&#8594;audio" in response.text or "latest→audio" in response.text       # merged earliest/latest
+    assert "language_prefix_parse" in response.text       # error visible
+    assert "12552 ms" in response.text                    # primary latency badge

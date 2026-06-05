@@ -74,6 +74,14 @@ class MemoryCfg(BaseModel):
     max_summary_tokens: int = 250
     max_pinned_facts: int = 12
     max_recall_snippets: int = 2
+    # Min content-token overlap for a recall snippet to be injected (an explicit
+    # "you told me…/pehle…" relaxes this to 1). Higher = less noise, fewer recalls.
+    recall_min_overlap: int = Field(default=2, ge=1, le=6)
+    # Aggregate budget (token ~ 4 chars) for the dynamic memory sections (facts +
+    # recall + running summary) so the per-turn system block can't inflate TTFB.
+    max_memory_block_tokens: int = Field(default=600, ge=100, le=2000)
+    # DEPRECATED: superseded by always-on lexical recall (search always runs;
+    # injection is gated by score, not by this flag). Kept for back-compat.
     recall_only_when_user_asks: bool = True
 
 

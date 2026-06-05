@@ -351,12 +351,20 @@ class MemoryProcessor(FrameProcessor):
         lstate = get_session_language_state(self._call_sid) or lang.new_language_state()
         hint = lang.language_hint_line(lstate)
 
-        recall: list[str] = []
-        if self._cfg.get("recall_only_when_user_asks", True) and mem.recall_triggered(user_text):
-            recall = mem.select_recall_snippets(
-                get_session_transcript(self._call_sid),
-                max_snippets=int(self._cfg.get("max_recall_snippets", 2)),
-            )
+        # Always lexical-search; inject only what scores above the bar (never
+        # regex-gated). An explicit back-reference ("you told me…", "pehle…")
+        # relaxes the threshold so an explicit ask reliably surfaces something.
+        recent_pairs = int(self._cfg.get("recent_turn_pairs", 6))
+        min_overlap = int(self._cfg.get("recall_min_overlap", 2))
+        if mem.recall_triggered(user_text):
+            min_overlap = 1
+        recall = mem.search_recall_snippets(
+            get_session_transcript(self._call_sid),
+            query=user_text,
+            max_snippets=int(self._cfg.get("max_recall_snippets", 2)),
+            min_overlap=min_overlap,
+            exclude_recent=recent_pairs * 2,
+        )
 
         system_block = mem.build_system_block(
             self._base_system,
@@ -365,6 +373,7 @@ class MemoryProcessor(FrameProcessor):
             pinned_facts=memory["pinned_facts"],
             running_summary=memory.get("running_summary"),
             recall_snippets=recall,
+            max_dynamic_tokens=int(self._cfg.get("max_memory_block_tokens", 600)),
         )
         trimmed = mem.trim_recent_messages(
             self._context.messages,

@@ -27,11 +27,58 @@ _PINNED_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Explicit back-reference cues (English + romanized/Devanagari Hindi). NOTE: this
+# no longer GATES recall — recall always runs a lexical search and injects on
+# score. This only signals "the user is explicitly asking to recall", which
+# RELAXES the match threshold so an explicit ask reliably surfaces something.
 _RECALL_RE = re.compile(
-    r"\b(what did i say|as i (?:said|told|mentioned)|earlier i|like i said"
-    r"|remember what i|go back to that|the thing i mentioned)\b",
+    r"(what did i say|as i (?:said|told|mentioned)|earlier i|like i said"
+    r"|remember what i|go back to that|the thing i mentioned"
+    r"|you (?:already |just )?told me|you (?:already |just )?said|did(?:n'?t)? you say"
+    r"|don'?t you remember|you remember|we (?:talked|spoke|discussed)"
+    r"|i (?:already |just )?(?:said|told|mentioned)|mentioned (?:earlier|before)"
+    r"|pehle|pichhle|yaad|bola tha|kaha tha|bataya|starting mein|shuru mein"
+    r"|पहले|याद|बताया|बोला था|कहा था)",
     re.IGNORECASE,
 )
+
+# Function/stop words dropped before lexical recall scoring so only CONTENT tokens
+# count. Includes the romanized-Hindi fillers above, common English function
+# words, recall meta-words ("told", "remember", "earlier" — which must not match
+# themselves), and frequent Hindi grammatical particles so Hinglish content
+# tokens dominate.
+_STOPWORDS = _FILLER | {
+    "the", "a", "an", "and", "or", "but", "if", "then", "so", "to", "of", "in", "on", "at",
+    "for", "with", "is", "am", "are", "was", "were", "be", "do", "does", "did", "have", "has",
+    "had", "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them", "my",
+    "your", "his", "its", "our", "their", "this", "that", "these", "those", "what", "which",
+    "who", "when", "where", "why", "how", "not", "can", "could", "would", "should", "will",
+    "just", "now", "about", "like", "mean", "said", "say", "tell", "told", "get", "got",
+    "already", "again", "still", "very", "please", "remember", "earlier", "before", "mentioned",
+    "discussed", "talked", "spoke", "dont", "don't", "na", "hai", "tha", "thi", "ko", "ka", "ki",
+    "ke", "mein", "se", "par", "kya", "kar", "raha", "rahi",
+}
+
+_ENTITY_RUN_RE = re.compile(r"[A-Z][a-z]+(?:[\s,]+[A-Z][a-z]+)+")
+
+
+def _salient_tokens(text: str) -> set[str]:
+    """Content tokens for lexical matching: lowercased, stop/filler words dropped.
+
+    The Devanagari block (U+0900–U+097F) is included explicitly because Python's
+    ``\\w`` excludes Devanagari combining vowel marks, which would otherwise split
+    a Hindi word like "हिंदी" into single base consonants and drop them. With the
+    range, Hindi/Hinglish text tokenizes whole, the same as English.
+    """
+    toks = re.findall(r"[\wऀ-ॿ']+", (text or "").lower())
+    return {t for t in toks if (t.isdigit() or len(t) >= 3) and t not in _STOPWORDS}
+
+
+def _has_concrete_fact(text: str) -> bool:
+    """True if the line carries a number or a multi-word proper-noun run (e.g. a
+    place or a list like 'Delhi Mall, Mumbai Central') — used to rank concrete
+    claims above chatty lines."""
+    return bool(re.search(r"\d", text)) or bool(_ENTITY_RUN_RE.search(text))
 
 
 def new_call_memory() -> dict[str, Any]:
@@ -65,17 +112,47 @@ def recall_triggered(user_text: str) -> bool:
     return bool(_RECALL_RE.search(user_text or ""))
 
 
-def select_recall_snippets(
-    transcript: list[dict[str, Any]], *, max_snippets: int
+def search_recall_snippets(
+    transcript: list[dict[str, Any]],
+    *,
+    query: str,
+    max_snippets: int,
+    min_overlap: int = 2,
+    exclude_recent: int = 0,
 ) -> list[str]:
-    """Pick a couple of earlier user utterances as recall snippets."""
-    user_lines = [
-        " ".join(str(ev.get("text", "")).split())
-        for ev in transcript
-        if ev.get("role") == "user" and ev.get("text")
-    ]
-    # Earliest user lines are the most likely "earlier context".
-    return user_lines[:max_snippets]
+    """Lexical recall over the full transcript (BOTH user and assistant turns).
+
+    Finds earlier turns whose content-token overlap with ``query`` is at least
+    ``min_overlap``, and returns the top ``max_snippets`` as role-tagged quotes
+    (``"user: ..."`` / ``"assistant: ..."``), ranked by overlap then recency. The
+    most recent ``exclude_recent`` events are skipped — they are already verbatim
+    in the recent window — so recall only surfaces OLDER context. Returns ``[]``
+    when nothing clears the bar: callers ALWAYS search but inject only what comes
+    back (always search, conditionally inject). Assistant lines are returned AS
+    quotes (claims the bot made), never asserted as truth.
+    """
+    if max_snippets <= 0:
+        return []
+    q = _salient_tokens(query)
+    if not q:
+        return []
+    events = transcript[:-exclude_recent] if exclude_recent > 0 else list(transcript)
+    q_norm = " ".join((query or "").split()).lower()
+    scored: list[tuple[int, int, str]] = []
+    for idx, ev in enumerate(events):
+        role = ev.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = " ".join(str(ev.get("text", "")).split())
+        if not text or text.lower() == q_norm:  # skip empties and the query turn itself
+            continue
+        overlap = len(q & _salient_tokens(text))
+        if overlap < min_overlap:
+            continue
+        score = overlap + (1 if _has_concrete_fact(text) else 0)
+        scored.append((score, idx, f"{role}: {text}"))
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)  # score desc, then recency
+    return [snippet for _score, _idx, snippet in scored[:max_snippets]]
 
 
 def should_update_summary(turn_count: int, memory_cfg: dict[str, Any]) -> bool:
@@ -92,24 +169,30 @@ def build_running_summary(
     recent_turn_pairs: int,
     max_summary_tokens: int,
 ) -> str:
-    """Deterministically compact the older portion of the call into a summary.
+    """Deterministically compact the OLDER portion of the call (BOTH roles).
 
-    Older = everything except the most recent ``recent_turn_pairs`` exchanges.
-    Cheap string work only (a token ~ 4 chars used as the length budget).
+    Older = every turn except the most recent ``2 * recent_turn_pairs`` events
+    (still verbatim in the recent window). Role-tagged so a recap reflects what the
+    assistant said too, not just the user — otherwise the bot's own earlier claims
+    vanish from any summary. Cheap string work only (token ~ 4 chars as the length
+    budget); no LLM.
     """
-    user_lines = [
-        " ".join(str(ev.get("text", "")).split())
-        for ev in transcript
-        if ev.get("role") == "user" and ev.get("text")
+    events = [
+        ev for ev in transcript
+        if ev.get("text") and ev.get("role") in ("user", "assistant")
     ]
-    older = user_lines[: max(0, len(user_lines) - recent_turn_pairs)]
+    window = max(0, recent_turn_pairs * 2)
+    older = events[: max(0, len(events) - window)]
     if not older:
         return ""
-    body = "; ".join(older)
+    lines = [
+        f"{ev['role']}: {' '.join(str(ev.get('text', '')).split())}" for ev in older
+    ]
+    body = "; ".join(lines)
     budget = max_summary_tokens * 4
     if len(body) > budget:
         body = body[:budget].rsplit(" ", 1)[0] + "…"
-    return f"Earlier in this call the user said: {body}"
+    return f"Earlier in this call: {body}"
 
 
 def update_summary_if_due(
@@ -141,22 +224,44 @@ def build_system_block(
     pinned_facts: list[str],
     running_summary: str | None,
     recall_snippets: list[str],
+    max_dynamic_tokens: int | None = None,
 ) -> str:
     """Assemble the dynamic system message for one turn.
 
     ``language_policy`` is the always-injected, code-owned <en>/<hi> contract;
     ``language_hint`` is an optional weak STT-derived hint. The persona prompt
     stays user-editable while the parser contract cannot be edited away.
+
+    The base prompt, policy and hint are always kept. The dynamic memory sections
+    (facts, recall, running summary) are bounded by ``max_dynamic_tokens`` (token ~
+    4 chars). Under budget they are kept highest-value first — durable facts and
+    query-relevant recall before the lossy running summary — so a big memory block
+    cannot silently inflate LLM TTFB. ``None`` means no cap (back-compat).
     """
     parts = [base_system_prompt.strip(), language_policy.strip()]
     if language_hint:
         parts.append(language_hint.strip())
+
+    # Highest-value first: facts + query-relevant recall before the lossy summary.
+    dynamic: list[str] = []
     if pinned_facts:
-        parts.append("Known facts for this call:\n- " + "\n- ".join(pinned_facts))
-    if running_summary:
-        parts.append(running_summary)
+        dynamic.append("Known facts for this call:\n- " + "\n- ".join(pinned_facts))
     if recall_snippets:
-        parts.append("Earlier context the user referenced:\n- " + "\n- ".join(recall_snippets))
+        dynamic.append("Possibly relevant earlier turns (quotes):\n- " + "\n- ".join(recall_snippets))
+    if running_summary:
+        dynamic.append(running_summary)
+
+    budget = max_dynamic_tokens * 4 if max_dynamic_tokens else None
+    for text in dynamic:
+        if budget is None:
+            parts.append(text)
+        elif len(text) <= budget:
+            parts.append(text)
+            budget -= len(text)
+        elif budget > 40:  # partial room left: truncate this section, then stop
+            parts.append(text[:budget].rsplit(" ", 1)[0] + "…")
+            budget = 0
+        # else: drop this (and any lower-priority) section entirely
     return "\n\n".join(p for p in parts if p)
 
 

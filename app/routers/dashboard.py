@@ -164,6 +164,10 @@ def _parse_config_form(form: Any, base: RuntimeConfig) -> RuntimeConfig:
         "summary_update_every_turns": i(
             "mem_summary_update_every_turns", base.memory.summary_update_every_turns
         ),
+        "recall_min_overlap": i("mem_recall_min_overlap", base.memory.recall_min_overlap),
+        "max_memory_block_tokens": i(
+            "mem_max_memory_block_tokens", base.memory.max_memory_block_tokens
+        ),
     }
     data["ops"] = {"debug_log_level": s("debug_log_level", base.ops.debug_log_level)}
     return RuntimeConfig.model_validate(data)

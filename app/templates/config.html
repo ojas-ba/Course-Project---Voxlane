@@ -86,7 +86,19 @@
         <div><label>Summary after turn</label><input name="mem_enable_running_summary_after_turn" value="{{ config.memory.enable_running_summary_after_turn }}" /></div>
         <div><label>Summary every N turns</label><input name="mem_summary_update_every_turns" value="{{ config.memory.summary_update_every_turns }}" /></div>
       </div>
-      <p class="hint">In-call memory only (recent window + pinned facts + a small running summary). No long-term/vector memory.</p>
+      <div class="row">
+        <div>
+          <label>Recall min overlap</label>
+          <input name="mem_recall_min_overlap" value="{{ config.memory.recall_min_overlap }}" />
+          <p class="hint">Content-word overlap needed to surface an earlier turn. Higher = fewer/cleaner recalls (1–6). An explicit “you told me…” relaxes it to 1.</p>
+        </div>
+        <div>
+          <label>Memory block token cap</label>
+          <input name="mem_max_memory_block_tokens" value="{{ config.memory.max_memory_block_tokens }}" />
+          <p class="hint">Budget for facts + recall + summary injected each turn, so a big block can’t inflate latency (100–2000).</p>
+        </div>
+      </div>
+      <p class="hint">In-call memory only (recent window + pinned facts + lexical recall over both speakers + a small running summary). No long-term/vector memory.</p>
     </fieldset>
 
     <fieldset><legend>Ops</legend>

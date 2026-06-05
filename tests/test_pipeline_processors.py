@@ -82,6 +82,42 @@ def test_memory_processor_does_not_inject_full_transcript():
         ACTIVE_SESSIONS.pop(call_sid, None)
 
 
+def test_govern_context_recalls_assistant_claim_past_window():
+    # Stage-1 fix: an assistant claim older than the recent window is retrieved by
+    # lexical recall and injected into the system block as a quote (not asserted).
+    call_sid = "c_recall"
+    _seed_session(call_sid)
+    ACTIVE_SESSIONS[call_sid]["transcript"] = [
+        {"event_index": 1, "role": "assistant", "phase": "task",
+         "text": "We have demo stations at Delhi Mall, Mumbai Central, Bangalore Tech Park."},
+    ] + [
+        {"event_index": i + 2, "role": "user", "phase": "task", "text": t}
+        for i, t in enumerate(["okay", "sure", "thanks", "got it", "no problem", "alright"])
+    ]
+    try:
+        ctx = LLMContext(messages=[{"role": "system", "content": "BASE"}])
+        ctx.add_message({"role": "user", "content": "u"})
+        ctx.add_message({"role": "assistant", "content": "a"})
+        mp = MemoryProcessor(
+            call_sid=call_sid, context=ctx, base_system_prompt="BASE",
+            memory_cfg={"recent_turn_pairs": 3, "max_recall_snippets": 2,
+                        "recall_min_overlap": 2, "max_memory_block_tokens": 600},
+        )
+        mp._govern_context("you already told me the demo locations, don't you remember?")
+        system = ctx.messages[0]["content"]
+        assert "Delhi Mall" in system        # the older assistant claim is recalled
+        assert "assistant:" in system         # surfaced as a quote, not asserted as truth
+    finally:
+        ACTIVE_SESSIONS.pop(call_sid, None)
+
+
+def test_memory_hot_path_is_synchronous_no_llm():
+    # Structural guarantee: governance runs on the hot path, so it must be pure/
+    # synchronous — no awaits means no network/LLM call is possible there.
+    import asyncio
+    assert not asyncio.iscoroutinefunction(MemoryProcessor._govern_context)
+
+
 def test_cartesia_language_update_frame_delta_type():
     frame = TTSUpdateSettingsFrame(delta=CartesiaTTSSettings(language=Language.HI))
     assert isinstance(frame.delta, TTSSettings)

@@ -369,6 +369,7 @@ class MemoryProcessor(FrameProcessor):
         system_block = mem.build_system_block(
             self._base_system,
             language_policy=lang.RESPONSE_LANGUAGE_POLICY,
+            factual_guardrail=lang.FACTUAL_GUARDRAIL,
             language_hint=hint,
             pinned_facts=memory["pinned_facts"],
             running_summary=memory.get("running_summary"),

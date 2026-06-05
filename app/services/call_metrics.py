@@ -69,6 +69,9 @@ class TurnMetricsObserver(BaseObserver):
         self._pending_user_stopped_at: float | None = None
         self._pending_bot_was_speaking: bool | None = None
         self._bot_speaking: bool = False
+        # Monotonic per-response id (one per LLMFullResponseStartFrame) so late
+        # frames from a superseded response can't cross-wire the active record.
+        self._response_seq: int = 0
         # Memory governance timing for the turn currently being assembled.
         self._pending_memory_duration_ms: float | None = None
         self._pending_context_message_count: int | None = None
@@ -183,17 +186,27 @@ class TurnMetricsObserver(BaseObserver):
             self._flush_incomplete()
             return
         if isinstance(frame, LLMFullResponseStartFrame):
+            self._response_seq += 1
             self._promote_pending(now)
             return
         if self._open is None:
             return
 
         if isinstance(frame, LLMTextFrame):
-            if self._open["llm_first_token_or_text_at"] is None:
+            # A text frame after this response already ended is a stray from a
+            # superseded response — ignore it.
+            if not self._open.get("_llm_ended") and self._open["llm_first_token_or_text_at"] is None:
                 self._open["llm_first_token_or_text_at"] = now
         elif isinstance(frame, LLMFullResponseEndFrame):
-            self._open["llm_completed_at"] = now
-            self._try_finalize()
+            # Accept the End only if this response actually produced text and has
+            # not already ended. A real response emits text before it ends, so an
+            # End arriving with no first-token (or a second End) is a stray/late
+            # frame from a superseded response — ignoring it prevents the
+            # impossible "LLM total 3 ms / TTFB —" cross-wiring.
+            if not self._open.get("_llm_ended") and self._open["llm_first_token_or_text_at"] is not None:
+                self._open["_llm_ended"] = True
+                self._open["llm_completed_at"] = now
+                self._try_finalize()
         elif isinstance(frame, TTSStartedFrame):
             if self._open["tts_request_started_at"] is None:
                 self._open["tts_request_started_at"] = now
@@ -239,6 +252,8 @@ class TurnMetricsObserver(BaseObserver):
                 t["bot_was_speaking_when_user_stopped"] for t in turns
             )
         merged["llm_request_started_at"] = now
+        merged["response_id"] = self._response_seq
+        merged["_llm_ended"] = False
         if merged.get("memory_processor_duration_ms") is None:
             merged["memory_processor_duration_ms"] = self._pending_memory_duration_ms
             merged["context_message_count"] = self._pending_context_message_count
@@ -277,6 +292,7 @@ class TurnMetricsObserver(BaseObserver):
 
     def _emit(self, rec: dict[str, Any]) -> None:
         rec.pop("_llm_response_noted", None)
+        rec.pop("_llm_ended", None)
         # Resolve language from the fully-updated per-call state if the parser
         # did not already annotate it.
         if self._language_provider is not None:

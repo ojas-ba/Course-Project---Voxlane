@@ -111,3 +111,40 @@ def test_sanitize_prefix_fallback_strips_malformed_tags():
     assert lang.sanitize_prefix_fallback_text("Hello there") == "Hello there"
     # Pure bracket junk collapses to empty (caller then speaks a safe line).
     assert lang.sanitize_prefix_fallback_text("<>") == ""
+
+
+def test_sanitize_language_control_tags_all_cases():
+    s = lang.sanitize_language_control_tags
+    assert s("<en>Hello") == "Hello"                                      # leading
+    assert s("Got it. Which class? <en>Was it philosophy?") == (         # misplaced (mid)
+        "Got it. Which class? Was it philosophy?"
+    )
+    assert s("<en><hi>Okay.") == "Okay."                                  # duplicate
+    assert s("<eng>Okay.") == "Okay."                                     # malformed
+    assert s("<<en>>Okay.") == "Okay."                                    # malformed
+    assert s("<hi Okay.") == "Okay."                                      # unclosed
+    assert s("Hi there!") == "Hi there!"                                  # normal text untouched
+    assert s("I have 3 < 5 apples") == "I have 3 < 5 apples"              # unrelated brackets kept
+    assert s("<en>") == ""                                                # tag-only -> empty
+
+
+def test_strip_control_tags_inline_preserves_whitespace():
+    # Streaming-safe: only tags removed, surrounding spaces kept (no word merge).
+    assert lang.strip_control_tags_inline("Hello <en>there") == "Hello  there"
+    assert lang.strip_control_tags_inline("Hello ") == "Hello "
+    assert lang.strip_control_tags_inline("no tags here") == "no tags here"
+
+
+def test_split_safe_emit_holds_partial_control_tag():
+    assert lang.split_safe_emit("Got it. <e") == ("Got it. ", "<e")        # forming tag held
+    assert lang.split_safe_emit("Got it. <") == ("Got it. ", "<")
+    assert lang.split_safe_emit("Got it. <en>Was") == ("Got it. <en>Was", "")  # complete -> not held
+    assert lang.split_safe_emit("3 < 5") == ("3 < 5", "")                  # not a control prefix
+    assert lang.split_safe_emit("plain text") == ("plain text", "")
+
+
+def test_policy_is_positional_and_guardrail_exists():
+    pol = lang.RESPONSE_LANGUAGE_POLICY.lower()
+    assert "first" in pol and "middle" in pol            # emphasizes position
+    assert "<en>" in lang.RESPONSE_LANGUAGE_POLICY and "<hi>" in lang.RESPONSE_LANGUAGE_POLICY
+    assert lang.FACTUAL_GUARDRAIL and "invent" in lang.FACTUAL_GUARDRAIL.lower()

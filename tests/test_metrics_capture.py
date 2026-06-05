@@ -304,6 +304,51 @@ def test_flush_emits_pending_turn_on_call_end():
     assert out[0]["error_stage"] == "no_bot_response"
 
 
+def test_response_id_is_stamped_on_record():
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    obs.note_user_turn(turn_id=1, user_text="a", stt_eot_received_at=1.0, turn_committed_at=1.0)
+    _push(obs, LLMFullResponseStartFrame())
+    _push(obs, LLMTextFrame("<en> hi"))
+    _push(obs, LLMFullResponseEndFrame())
+    obs.note_assistant_text("hi")
+    _push(obs, BotStartedSpeakingFrame())
+    assert out[0]["response_id"] == 1
+
+
+def test_stray_late_llm_end_does_not_corrupt_active_response():
+    # A late End from a superseded response arrives before the active response has
+    # produced any text -> ignored, so llm_completed_at stays None (no bogus 3ms).
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    obs.note_user_turn(turn_id=1, user_text="a", stt_eot_received_at=1.0, turn_committed_at=1.0)
+    _push(obs, LLMFullResponseStartFrame())     # open, response_id=1
+    _push(obs, LLMFullResponseEndFrame())       # stray End: no first-text yet -> ignored
+    assert obs._open["llm_completed_at"] is None
+    assert not obs._open.get("_llm_ended")
+    # The real frames for this response then arrive and ARE accepted.
+    _push(obs, LLMTextFrame("<en> hi"))
+    _push(obs, LLMFullResponseEndFrame())
+    assert obs._open["llm_completed_at"] is not None
+    obs.note_assistant_text("hi")
+    _push(obs, BotStartedSpeakingFrame())
+    assert out[0]["llm_total_ms"] is not None
+
+
+def test_superseded_response_is_emitted_with_its_own_response_id():
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    obs.note_user_turn(turn_id=1, user_text="a", stt_eot_received_at=1.0, turn_committed_at=1.0)
+    _push(obs, LLMFullResponseStartFrame())     # response 1 opens
+    _push(obs, LLMTextFrame("<en> first"))
+    _push(obs, UserStoppedSpeakingFrame())
+    obs.note_user_turn(turn_id=2, user_text="b", stt_eot_received_at=2.0, turn_committed_at=2.0)
+    _push(obs, LLMFullResponseStartFrame())     # response 2 supersedes response 1
+    assert out and out[-1]["error_stage"] == "superseded_by_new_response"
+    assert out[-1]["response_id"] == 1          # the superseded record kept id 1
+    assert obs._open["response_id"] == 2        # active record is response 2
+
+
 def test_end_frame_alone_does_not_finalize_before_parser_note():
     # P1-1 guard: LLMFullResponseEndFrame is timing only; the record must wait
     # for the parser's note_assistant_text even if audio already arrived.

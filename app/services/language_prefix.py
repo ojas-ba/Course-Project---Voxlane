@@ -51,7 +51,10 @@ from app.services.language import (
     fallback_response_language,
     new_language_state,
     record_response_language,
+    sanitize_language_control_tags,
     sanitize_prefix_fallback_text,
+    split_safe_emit,
+    strip_control_tags_inline,
     to_language_enum,
     try_parse_language_prefix,
 )
@@ -83,6 +86,8 @@ class LanguagePrefixProcessor(FrameProcessor):
         self._prefix_buffer = ""      # accumulates until the tag resolves
         self._spoken_parts: list[str] = []
         self._prefix_error: str | None = None
+        self._emit_carry = ""         # held trailing fragment (split-tag safety)
+        self._raw_llm_text = ""        # full raw LLM text (for last-resort recovery)
 
     async def process_frame(
         self, frame: Any, direction: FrameDirection = FrameDirection.DOWNSTREAM
@@ -109,6 +114,7 @@ class LanguagePrefixProcessor(FrameProcessor):
         await self.push_frame(frame, direction)
 
     async def _handle_llm_text(self, text: str, direction: FrameDirection) -> None:
+        self._raw_llm_text += text
         if self._prefix_done:
             await self._emit_spoken(text, direction)
             return
@@ -130,10 +136,24 @@ class LanguagePrefixProcessor(FrameProcessor):
             )
             await self._resolve_prefix(language, remainder, direction)
 
-        # A malformed/empty reply may sanitize down to nothing speakable — say a
-        # short safe line rather than going silent.
-        if self._prefix_error and not self._spoken_parts:
-            await self._emit_spoken(_SAFE_REPEAT_LINE, direction)
+        # Drop any held streaming fragment: split_safe_emit only ever holds an
+        # UNFINISHED control-tag fragment (e.g. "<e"), which never completed, so it
+        # is control junk — never speakable content.
+        self._emit_carry = ""
+
+        spoken = "".join(self._spoken_parts).strip()
+        if not spoken:
+            # Last-resort RECOVERY before any safe line: a prefix parse failure
+            # ALONE must never become a fake "repeat that". Sanitize the full raw
+            # LLM text and speak whatever real words it had.
+            recovered = sanitize_language_control_tags(self._raw_llm_text)
+            if recovered:
+                await self._push_spoken_text(recovered, direction)
+                spoken = recovered
+        if not spoken:
+            # Only now — the model genuinely produced nothing usable.
+            await self._push_spoken_text(_SAFE_REPEAT_LINE, direction)
+            spoken = _SAFE_REPEAT_LINE
 
         if self._metrics is not None:
             # Record the error BEFORE the assistant text: note_assistant_text is
@@ -144,7 +164,8 @@ class LanguagePrefixProcessor(FrameProcessor):
                     stage=self._prefix_error,
                     message="LLM reply missing/malformed <en>/<hi> tag; used fallback language.",
                 )
-            self._metrics.note_assistant_text("".join(self._spoken_parts).strip())
+            # Defensive: never persist a control tag even if streaming missed one.
+            self._metrics.note_assistant_text(sanitize_language_control_tags(spoken))
 
     async def _resolve_prefix(
         self, language: str | None, remainder: str, direction: FrameDirection
@@ -181,9 +202,29 @@ class LanguagePrefixProcessor(FrameProcessor):
             )
 
     async def _emit_spoken(self, text: str, direction: FrameDirection) -> None:
+        """Stream spoken text to TTS, stripping any misplaced/duplicate control tag.
+
+        A trailing fragment that could still be forming a ``<en>``/``<hi>`` tag is
+        held back (split across LLM chunks) and reconsidered on the next chunk, so a
+        control tag is never emitted half-stripped. Complete tags found anywhere are
+        removed before the text reaches TTS.
+        """
+        if not text:
+            return
+        self._emit_carry += text
+        emittable, self._emit_carry = split_safe_emit(self._emit_carry)
+        if not emittable:
+            return
+        emittable = strip_control_tags_inline(emittable)
         # Strip the space that follows the tag from the very first spoken chunk.
         if not self._spoken_parts:
-            text = text.lstrip()
+            emittable = emittable.lstrip()
+        if not emittable:
+            return
+        await self._push_spoken_text(emittable, direction)
+
+    async def _push_spoken_text(self, text: str, direction: FrameDirection) -> None:
+        """Record + forward already-sanitized spoken text to TTS."""
         if not text:
             return
         self._spoken_parts.append(text)

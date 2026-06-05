@@ -34,22 +34,35 @@ SUPPORTED_RESPONSE_LANGUAGES = ("en", "hi")
 # prefix buffer stays tiny and streaming is barely delayed.
 LANGUAGE_PREFIX_MAX_CHARS = 24
 
-# Always-injected policy (code-owned, NOT user-editable) so that editing the
-# persona prompt in /config can never break the <en>/<hi> parser contract.
+# Always-injected policy (code-owned, NOT user-editable). It is placed BEFORE the
+# persona prompt so a persona's own prefix-less example replies can never override
+# the <en>/<hi> contract. The positional wording is deliberately emphatic because
+# small models tend to drop or misplace the tag when the persona shows tag-less
+# examples.
 RESPONSE_LANGUAGE_POLICY = (
-    "You are a low-latency multilingual phone assistant.\n"
-    "Begin EVERY reply with exactly one language tag: <en> or <hi>.\n"
+    "OUTPUT PROTOCOL (system rule — overrides any example shown in the persona below):\n"
+    "Begin EVERY reply with exactly ONE language tag as the VERY FIRST characters:\n"
     "  <en> = reply in English only.\n"
     "  <hi> = reply in simple, natural Hindi/Hinglish suitable for an Indian phone call.\n"
-    "Immediately after the tag, write only the words to be spoken.\n"
-    "Rules:\n"
-    "- If the user explicitly asks for English, use <en> and reply in English only.\n"
-    "- If the user explicitly asks for Hindi or Hinglish, use <hi>.\n"
-    "- If there is no explicit request, mirror the latest user's language and style.\n"
+    "The tag MUST be the first text in the reply. Never place a tag in the middle of "
+    "the reply. Never repeat the tag. Never skip it. Immediately after the tag, write "
+    "only the words to be spoken. The tag is for the system and must NOT be spoken or "
+    "explained.\n"
+    "Language choice:\n"
+    "- If the user explicitly asks for English, use <en>; for Hindi/Hinglish, use <hi>.\n"
+    "- Otherwise mirror the latest user's language and style.\n"
     "- Keep phone replies short: usually 1-2 sentences. Ask one question at a time.\n"
-    "- Give a longer answer only when the user explicitly asks for detail.\n"
-    "- The tag is for the system and must NOT be spoken or explained.\n"
     "- Do not output JSON, markdown, code fences, or quotes around your reply."
+)
+
+# Always-injected, persona-INDEPENDENT guardrail against fabricated specifics
+# (a persona prompt cannot remove it because it is added by code). Applies to every
+# persona, not just sales.
+FACTUAL_GUARDRAIL = (
+    "Do not invent real addresses, store locations, prices, timings, availability, "
+    "company names, personal details, or current facts. If the user asks for "
+    "fictional or demo details, say clearly that they are fictional. If you do not "
+    "have verified data, say you do not know."
 )
 
 
@@ -191,8 +204,67 @@ def sanitize_prefix_fallback_text(text: str) -> str:
     upstream and never reach here.
     """
     cleaned = _FALLBACK_TAGLIKE_RE.sub("", text or "")
-    cleaned = cleaned.lstrip("<> \t\r\n")
+    cleaned = _LEADING_UNCLOSED_CONTROL_RE.sub("", cleaned)  # leading "<hi " / "<en "
+    # lstrip only — preserve TRAILING whitespace so a streamed first chunk does not
+    # merge with the next chunk (e.g. "Hello there " + "friend").
+    return cleaned.lstrip("<> \t\r\n")
+
+
+# --- universal control-tag sanitizers (defensive: TTS / context / transcript) ---
+
+# A well-formed internal control tag (<en> / <hi>), anywhere in the text.
+_CONTROL_TAG_RE = re.compile(r"<\s*(?:en|hi)\s*>", re.IGNORECASE)
+# A leading UNCLOSED control fragment, e.g. "<hi Okay." or "<en " (no '>').
+_LEADING_UNCLOSED_CONTROL_RE = re.compile(r"^\s*<\s*(?:en|hi)\b\s*", re.IGNORECASE)
+# A trailing fragment that could still be FORMING a control tag (streaming carry).
+_PARTIAL_TAG_TAIL_RE = re.compile(r"<[^>]{0,3}$")
+
+
+def sanitize_language_control_tags(text: str) -> str:
+    """Strip internal <en>/<hi> control tags from a COMPLETE assistant string.
+
+    Removes well-formed <en>/<hi> tags ANYWHERE (so a tag the model misplaced
+    mid-reply can never be spoken or stored), plus a leading malformed/unclosed
+    control fragment (``<eng>``, ``<<en>>``, ``"<hi ..."``). Unrelated angle-bracket
+    content (e.g. ``"3 < 5"``) is left intact. May return ``""`` if the whole input
+    was tag junk. Use this at every TTS / context / transcript / metrics choke point.
+    """
+    if not text:
+        return text
+    cleaned = _CONTROL_TAG_RE.sub(" ", text)                 # well-formed tags -> space
+    cleaned = _LEADING_UNCLOSED_CONTROL_RE.sub("", cleaned)  # leading "<hi " / "<en "
+    cleaned = _FALLBACK_TAGLIKE_RE.sub("", cleaned)          # leading "<eng>" / "<<en>"
+    cleaned = cleaned.lstrip("<> \t")
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     return cleaned.strip()
+
+
+def strip_control_tags_inline(text: str) -> str:
+    """Strip only well-formed <en>/<hi> tags, PRESERVING surrounding whitespace.
+
+    For per-chunk STREAMING use, where collapsing/trimming whitespace would merge
+    words across chunks. A tag becomes a single space to keep a word boundary.
+    """
+    return _CONTROL_TAG_RE.sub(" ", text or "")
+
+
+def split_safe_emit(buffer: str) -> tuple[str, str]:
+    """Split streamed text into ``(emit_now, hold_back)``.
+
+    Holds back a trailing fragment that could still be forming a control tag
+    (``<``, ``<e``, ``<en``, ``<h``, ``<hi``) so a tag split across LLM chunks is
+    never emitted half-stripped. Everything else is safe to emit now. The held
+    fragment is reconsidered when the next chunk arrives (or dropped at response
+    end, since an unfinished control fragment is never speakable content).
+    """
+    if not buffer:
+        return "", ""
+    m = _PARTIAL_TAG_TAIL_RE.search(buffer)
+    if m:
+        inner = buffer[m.start():].lstrip("<").strip().lower()
+        if inner == "" or "en".startswith(inner) or "hi".startswith(inner):
+            return buffer[: m.start()], buffer[m.start():]
+    return buffer, ""
 
 
 def try_parse_language_prefix(

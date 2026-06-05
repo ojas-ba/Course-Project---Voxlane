@@ -1,4 +1,10 @@
+from app.models.runtime_config_models import MemoryCfg
 from app.services import memory as mem
+
+
+def test_recall_min_overlap_default_is_2():
+    # 5 effectively disables lexical recall in short spoken turns; default stays 2.
+    assert MemoryCfg().recall_min_overlap == 2
 
 
 def test_extract_pinned_accepts_durable_statement():

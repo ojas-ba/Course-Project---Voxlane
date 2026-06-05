@@ -175,6 +175,89 @@ def test_greeting_ttsspeak_passes_through_untouched():
     assert captured == [greeting]  # forwarded unchanged, not intercepted
 
 
+# --- hardening: misplaced / duplicate / recovery / safe-repeat ----------------
+
+def test_misplaced_mid_response_tag_is_stripped_before_tts():
+    # The exact Maya-call bug: "...awesome?<en>Was it..." must not leak <en> to TTS.
+    m = _FakeMetrics()
+    proc, captured = _make(metrics=m)
+    asyncio.run(_run(proc, [
+        LLMFullResponseStartFrame(),
+        LLMTextFrame("Got it. Which class turned out awesome? "),
+        LLMTextFrame("<en>Was it a weird elective?"),
+        LLMFullResponseEndFrame(),
+    ]))
+    spoken = _spoken(captured)
+    assert "<en>" not in spoken
+    assert "Got it." in spoken and "Was it a weird elective?" in spoken
+    assert "<en>" not in (m.assistant_text or "")
+
+
+def test_split_mid_response_tag_is_stripped_before_tts():
+    proc, captured = _make()
+    asyncio.run(_run(proc, [
+        LLMFullResponseStartFrame(),
+        LLMTextFrame("<en>Hello <e"),     # leading tag ok; a second tag begins...
+        LLMTextFrame("n>there"),          # ...and completes across the chunk boundary
+        LLMFullResponseEndFrame(),
+    ]))
+    spoken = _spoken(captured)
+    assert "<en>" not in spoken
+    assert "Hello" in spoken and "there" in spoken
+
+
+def test_duplicate_leading_tags_are_stripped():
+    proc, captured = _make()
+    asyncio.run(_run(proc, [
+        LLMFullResponseStartFrame(),
+        LLMTextFrame("<en><hi>Okay then."),
+        LLMFullResponseEndFrame(),
+    ]))
+    spoken = _spoken(captured)
+    assert "<en>" not in spoken and "<hi>" not in spoken
+    assert "Okay then." in spoken
+
+
+def test_missing_prefix_with_valid_text_does_not_fake_repeat():
+    # The gel-pen bug: a clear utterance must NOT become "Sorry, could you repeat".
+    m = _FakeMetrics()
+    proc, captured = _make(metrics=m)
+    asyncio.run(_run(proc, [
+        LLMFullResponseStartFrame(),
+        LLMTextFrame("I use a gel pen, not girlfriend. Gel pen, got it."),
+        LLMFullResponseEndFrame(),
+    ]))
+    spoken = _spoken(captured)
+    assert "Sorry, could you repeat" not in spoken
+    assert "gel pen" in spoken.lower()
+    assert m.errors and m.errors[0][0] == "language_prefix_parse"  # error still recorded
+
+
+def test_safe_repeat_only_when_nothing_usable():
+    # Tag-only output (no real words) is the ONLY case that may safe-repeat.
+    proc, captured = _make()
+    asyncio.run(_run(proc, [
+        LLMFullResponseStartFrame(),
+        LLMTextFrame("<en>"),
+        LLMFullResponseEndFrame(),
+    ]))
+    assert _spoken(captured) == "Sorry, could you repeat that?"
+
+
+def test_no_control_tag_reaches_tts_or_metrics_on_prefixless_plus_mid_tag():
+    m = _FakeMetrics()
+    proc, captured = _make(metrics=m)
+    asyncio.run(_run(proc, [
+        LLMFullResponseStartFrame(),
+        LLMTextFrame("Okay, that was oddly specific.<en> Anyway."),
+        LLMFullResponseEndFrame(),
+    ]))
+    for f in captured:
+        t = getattr(f, "text", "")
+        assert "<en>" not in t and "<hi>" not in t
+    assert m.assistant_text and "<en>" not in m.assistant_text
+
+
 # --- P2-2: malformed tags must never be spoken --------------------------------
 
 @pytest.mark.parametrize("raw,banned", [

@@ -224,21 +224,28 @@ def build_system_block(
     pinned_facts: list[str],
     running_summary: str | None,
     recall_snippets: list[str],
+    factual_guardrail: str | None = None,
     max_dynamic_tokens: int | None = None,
 ) -> str:
     """Assemble the dynamic system message for one turn.
 
-    ``language_policy`` is the always-injected, code-owned <en>/<hi> contract;
-    ``language_hint`` is an optional weak STT-derived hint. The persona prompt
-    stays user-editable while the parser contract cannot be edited away.
+    ``language_policy`` is the always-injected, code-owned <en>/<hi> contract and
+    ``factual_guardrail`` is the persona-independent no-fake-specifics rule; both
+    are placed BEFORE the persona prompt so a persona's own prefix-less examples or
+    creative leeway cannot override them. ``language_hint`` is an optional weak
+    STT-derived hint. The persona prompt stays user-editable while these system
+    rules cannot be edited away.
 
-    The base prompt, policy and hint are always kept. The dynamic memory sections
-    (facts, recall, running summary) are bounded by ``max_dynamic_tokens`` (token ~
-    4 chars). Under budget they are kept highest-value first — durable facts and
-    query-relevant recall before the lossy running summary — so a big memory block
-    cannot silently inflate LLM TTFB. ``None`` means no cap (back-compat).
+    The protocol/guardrail/persona/hint are always kept. The dynamic memory
+    sections (facts, recall, running summary) are bounded by ``max_dynamic_tokens``
+    (token ~ 4 chars). Under budget they are kept highest-value first — durable
+    facts and query-relevant recall before the lossy running summary — so a big
+    memory block cannot silently inflate LLM TTFB. ``None`` means no cap (back-compat).
     """
-    parts = [base_system_prompt.strip(), language_policy.strip()]
+    parts = [language_policy.strip()]
+    if factual_guardrail:
+        parts.append(factual_guardrail.strip())
+    parts.append(base_system_prompt.strip())
     if language_hint:
         parts.append(language_hint.strip())
 

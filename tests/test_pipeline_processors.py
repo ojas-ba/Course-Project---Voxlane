@@ -111,6 +111,27 @@ def test_govern_context_recalls_assistant_claim_past_window():
         ACTIVE_SESSIONS.pop(call_sid, None)
 
 
+def test_govern_context_injects_code_owned_protocol_and_guardrail_before_persona():
+    call_sid = "c_guard"
+    _seed_session(call_sid)
+    try:
+        ctx = LLMContext(messages=[{"role": "system", "content": "PERSONA-X"}])
+        mp = MemoryProcessor(
+            call_sid=call_sid, context=ctx, base_system_prompt="PERSONA-X",
+            memory_cfg={"recent_turn_pairs": 6},
+        )
+        mp._govern_context("hello")
+        system = ctx.messages[0]["content"]
+        assert "OUTPUT PROTOCOL" in system            # code-owned language contract
+        assert "Do not invent real addresses" in system  # code-owned factual guardrail
+        assert "PERSONA-X" in system                  # persona still present
+        # both system rules precede the persona, so the persona can't override them
+        assert system.index("OUTPUT PROTOCOL") < system.index("PERSONA-X")
+        assert system.index("Do not invent real addresses") < system.index("PERSONA-X")
+    finally:
+        ACTIVE_SESSIONS.pop(call_sid, None)
+
+
 def test_memory_hot_path_is_synchronous_no_llm():
     # Structural guarantee: governance runs on the hot path, so it must be pure/
     # synchronous — no awaits means no network/LLM call is possible there.

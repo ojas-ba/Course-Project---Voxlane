@@ -49,6 +49,15 @@ class Settings(BaseSettings):
         default=0,
         alias="OUTBOUND_GREETING_START_DELAY_MS",
     )
+    # Settle delay between the carrier (Exotel) client connecting and the bot
+    # speaking its opening greeting. Producing audio in the first instant after
+    # the media stream opens lets the carrier drop it (synthesized on our side but
+    # never heard by the caller). Used when no explicit greeting_start_delay_ms is
+    # provided. Set 0 to speak immediately on connect.
+    greeting_settle_delay_ms: int = Field(
+        default=500,
+        alias="GREETING_SETTLE_DELAY_MS",
+    )
     pending_outbound_ttl_secs: float = Field(
         default=600.0,
         alias="PENDING_OUTBOUND_TTL_SECS",

@@ -141,6 +141,68 @@ def test_stt_ready_state_is_tri_state_not_a_latch():
     assert _stt_ready_state(non_deferred, 200.0) is True
 
 
+def test_greeting_settle_delay_default_is_500():
+    assert get_settings().greeting_settle_delay_ms == 500
+
+
+def test_opening_greeting_fires_on_client_connected_autonomously():
+    # The greeting must play on carrier-connect, exactly once, WITHOUT waiting for
+    # the caller to speak. Speaking before connect lets the carrier drop the audio.
+    import asyncio
+
+    from loguru import logger
+    from pipecat.frames.frames import TTSSpeakFrame
+
+    from app.runtime import ACTIVE_SESSIONS
+    from app.services.pipecat_pipeline import _schedule_opening_greeting
+
+    call_sid = "c_greet"
+    ACTIVE_SESSIONS[call_sid] = {
+        "call_sid": call_sid, "stream_sid": "s", "metrics": {}, "transcript": [],
+        "first_latency": None, "config_snapshot": {}, "memory": {}, "language_state": {},
+    }
+
+    class _FakeTransport:
+        def __init__(self):
+            self.handlers = {}
+
+        def event_handler(self, name):
+            def deco(fn):
+                self.handlers[name] = fn
+                return fn
+            return deco
+
+    class _FakeTask:
+        def __init__(self):
+            self.frames = []
+
+        async def queue_frame(self, frame):
+            self.frames.append(frame)
+
+    transport = _FakeTransport()
+    task = _FakeTask()
+    try:
+        async def run():
+            state = _schedule_opening_greeting(
+                transport=transport, task=task, log=logger,
+                call_sid=call_sid, greeting_text="Hi there!", settle_ms=0,
+            )
+            assert "on_client_connected" in transport.handlers
+            # No caller speech — connecting alone triggers the greeting.
+            await transport.handlers["on_client_connected"](transport, object())
+            await state["task"]
+            # A re-fired connect must NOT speak the greeting twice.
+            await transport.handlers["on_client_connected"](transport, object())
+            return state
+
+        asyncio.run(run())
+        assert len(task.frames) == 1
+        assert isinstance(task.frames[0], TTSSpeakFrame)
+        assert task.frames[0].text == "Hi there!"
+    finally:
+        ACTIVE_SESSIONS.pop(call_sid, None)
+
+
 def test_user_muted_until_first_bot_complete_during_greeting():
     # Greeting-phase safety (makes deferred STT safe): the caller is muted until
     # the opening greeting completes, so early audio can't create a turn.

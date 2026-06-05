@@ -379,6 +379,52 @@ def _record_greeting(*, call_sid: str, greeting_text: str) -> None:
     )
 
 
+def _schedule_opening_greeting(
+    *,
+    transport: Any,
+    task: Any,
+    log: Any,
+    call_sid: str,
+    greeting_text: str,
+    settle_ms: int,
+) -> dict[str, Any]:
+    """Speak the opening greeting once the carrier client is connected.
+
+    Registers an ``on_client_connected`` handler — which the transport fires
+    unconditionally when its input starts — that, after a short settle delay,
+    records and queues the greeting. The greeting fires **autonomously**: it never
+    waits for the caller to speak. Speaking before the client is connected lets the
+    carrier (Exotel) drop the first audio (it is synthesized on our side, so
+    BotStartedSpeaking fires, but the caller never hears it). The settle delay runs
+    in a background task so it does not block transport startup. Returns a shared
+    state dict so the caller's disconnect handler can cancel a pending greeting.
+    """
+    state: dict[str, Any] = {"queued": False, "task": None}
+
+    async def _speak_greeting() -> None:
+        try:
+            if settle_ms > 0:
+                await asyncio.sleep(settle_ms / 1000)
+            _record_greeting(call_sid=call_sid, greeting_text=greeting_text)
+            update_session_metric(call_sid, "first_tts_frame_queued_at", time.time())
+            log.info("Speaking opening greeting", settle_ms=settle_ms, chars=len(greeting_text))
+            await task.queue_frame(TTSSpeakFrame(greeting_text, append_to_context=True))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # greeting scheduling must never crash the call
+            log.warning("Failed to queue opening greeting: {err}", err=str(exc))
+
+    @transport.event_handler("on_client_connected")
+    async def _on_client_connected(transport_ref: Any, client: Any) -> None:
+        if state["queued"]:
+            return
+        state["queued"] = True
+        log.info("Exotel client connected; scheduling opening greeting", settle_ms=settle_ms)
+        state["task"] = asyncio.create_task(_speak_greeting())
+
+    return state
+
+
 def _build_pipeline_processors(
     *,
     transport: FastAPIWebsocketTransport,
@@ -562,15 +608,10 @@ async def run_pipeline(
         log.info("First bot speech latency", latency_secs=f"{latency_seconds:.3f}")
         update_session_first_latency(call_sid, latency_seconds, observed_at=time.time())
 
-    @transport.event_handler("on_client_disconnected")
-    async def _on_client_disconnected(transport_ref: Any, client: Any) -> None:
-        log.info("Transport client disconnected, cancelling pipeline task")
-        await task.cancel()
-
     # --- Initial greeting (bot speaks first) ---
-    if greeting_start_delay_ms > 0:
-        await asyncio.sleep(greeting_start_delay_ms / 1000)
-
+    # The greeting is spoken from on_client_connected (see _schedule_opening_greeting)
+    # so the carrier media path is up before we send audio, then a short settle
+    # delay. It fires autonomously — it never waits for the caller to speak.
     greeting_source = prepared_greeting_text if opening_mode == "outbound" else None
     # Defensive: the greeting is spoken via TTSSpeakFrame and never passes through
     # LanguagePrefixProcessor, so strip any leaked <en>/<hi> tag before it is
@@ -579,9 +620,23 @@ async def run_pipeline(
     cleaned_greeting = lang.strip_language_prefix_tag(
         _normalize_transcript_text(greeting_source or snapshot["INITIAL_GREETING_FALLBACK_TEXT"])
     )
-    _record_greeting(call_sid=call_sid, greeting_text=cleaned_greeting)
-    update_session_metric(call_sid, "first_tts_frame_queued_at", time.time())
-    await task.queue_frame(TTSSpeakFrame(cleaned_greeting, append_to_context=True))
+    settle_ms = (
+        greeting_start_delay_ms
+        if greeting_start_delay_ms > 0
+        else settings.greeting_settle_delay_ms
+    )
+    greeting_state = _schedule_opening_greeting(
+        transport=transport, task=task, log=log, call_sid=call_sid,
+        greeting_text=cleaned_greeting, settle_ms=settle_ms,
+    )
+
+    @transport.event_handler("on_client_disconnected")
+    async def _on_client_disconnected(transport_ref: Any, client: Any) -> None:
+        log.info("Transport client disconnected, cancelling pipeline task")
+        greeting_task = greeting_state.get("task")
+        if greeting_task is not None and not greeting_task.done():
+            greeting_task.cancel()
+        await task.cancel()
 
     runner = PipelineRunner(handle_sigint=False)
     log.info("Pipeline runner starting", stream_sid=stream_sid)

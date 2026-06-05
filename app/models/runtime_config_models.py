@@ -37,6 +37,14 @@ class STTCfg(BaseModel):
     # Connect the Flux websocket in the background on start so the opening
     # greeting isn't blocked ~1s waiting for STT (see deferred_flux_stt.py).
     defer_connect_on_start: bool = True
+    # Pipecat's POST-STT user-turn debounce before the LLM fires — NOT Deepgram
+    # endpointing (that is eot_timeout_ms). Pipecat's ExternalUserTurnStopStrategy
+    # default is 500ms; because UserStoppedSpeakingFrame (a SystemFrame) overtakes
+    # the queued finalized TranscriptionFrame, the immediate trigger misses and
+    # THIS timeout is what actually fires the turn — so it is a fixed per-turn
+    # pre-LLM delay. Default 500 preserves current behavior; lower = less latency
+    # but too low risks splitting a turn whose final transcript arrives in pieces.
+    turn_stop_timeout_ms: int = Field(default=500, ge=100, le=1000)
 
 
 class LLMCfg(BaseModel):

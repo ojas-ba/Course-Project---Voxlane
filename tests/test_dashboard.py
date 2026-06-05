@@ -29,6 +29,7 @@ def test_config_page_renders(client):
     assert "Defer connect on start" in response.text
     assert "Memory" in response.text
     assert "EOT timeout (ms)" in response.text
+    assert "Turn stop debounce timeout" in response.text  # LAT-2 configurable debounce
 
 
 def test_root_renders_config(client):
@@ -155,3 +156,46 @@ def test_call_detail_renders_breakdown_merged_and_error(client):
     assert "latest&#8594;audio" in response.text or "latest→audio" in response.text       # merged earliest/latest
     assert "language_prefix_parse" in response.text       # error visible
     assert "12552 ms" in response.text                    # primary latency badge
+
+
+def test_call_detail_renders_overlap_ready_and_latest_commit(client):
+    # MET-1 (overlap), OBS-1 (tri-state STT ready), LAT-1 (latest Commit->LLM).
+    fake_log = {
+        "_id": "x", "call_sid": "call_ovl", "stream_sid": "s",
+        "config_snapshot": {"runtime_config": {}},
+        "transcript": [{"role": "assistant", "phase": "greeting", "text": "Hi!"}],
+        "metrics": {
+            "greeting_text_source": "llm",
+            "turn_records": [
+                {
+                    "turn_id": 5, "merged_user_turn_ids": [5, 6],
+                    "merged_user_texts": ["Hello.", "Yes please."],
+                    "user_text": "Hello.\nYes please.", "assistant_text": "Sure.",
+                    "detected_language": "en", "response_language": "en",
+                    "user_stop_to_first_audio_ms": 8000.0, "primary_latency_ms": 8000.0,
+                    "earliest_user_stop_to_first_audio_ms": 8000.0,
+                    "latest_user_stop_to_first_audio_ms": 1100.0,
+                    "turn_committed_to_llm_start_ms": 7500.0,
+                    "latest_turn_committed_to_llm_start_ms": 480.0,
+                    "llm_ttfb_ms": 400.0, "llm_total_ms": 430.0,
+                    "llm_end_to_tts_start_ms": -9.0,  # streaming overlap
+                    "tts_first_audio_ms": 120.0,
+                    "stt_ready_before_user_turn": True,
+                    "error_stage": None, "error_message": None,
+                }
+            ],
+        },
+    }
+
+    async def _find_one(query):
+        return fake_log
+
+    fake_collection = {"call_logs": type("C", (), {"find_one": staticmethod(_find_one)})()}
+    with patch("app.routers.dashboard.get_database", return_value=fake_collection):
+        response = client.get("/calls/call_ovl")
+
+    assert response.status_code == 200
+    assert "overlap 9" in response.text                       # MET-1: negative shown as overlap
+    assert "STT ready: yes" in response.text                  # OBS-1: tri-state ready
+    assert "latest Commit" in response.text                   # LAT-1: latest-anchored commit chip
+    assert "480" in response.text                             # latest Commit->LLM value rendered

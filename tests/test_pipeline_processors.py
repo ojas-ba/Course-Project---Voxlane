@@ -87,3 +87,72 @@ def test_cartesia_language_update_frame_delta_type():
     assert isinstance(frame.delta, TTSSettings)
     assert isinstance(frame.delta, CartesiaTTSSettings)
     assert frame.delta.language == Language.HI
+
+
+# --- STT-1: transcript observability -----------------------------------------
+
+def test_stt_observability_logs_final_and_records_hint():
+    from pipecat.frames.frames import InterimTranscriptionFrame, TranscriptionFrame
+    from app.runtime import get_session_language_state
+    from app.services.pipecat_pipeline import SttLanguageHintProcessor
+
+    call_sid = "c_stt"
+    _seed_session(call_sid)
+    try:
+        proc = SttLanguageHintProcessor(call_sid=call_sid)
+        # Interim: logged, no hint recorded, no crash.
+        proc._observe_transcript(
+            InterimTranscriptionFrame(text="pe", user_id="u", timestamp="t", language=Language.EN)
+        )
+        # Final: logged + weak hint recorded.
+        proc._observe_transcript(
+            TranscriptionFrame(
+                text="pen please", user_id="u", timestamp="t",
+                language=Language.HI, finalized=True,
+            )
+        )
+        assert get_session_language_state(call_sid)["last_user_language"] == "hi"
+    finally:
+        ACTIVE_SESSIONS.pop(call_sid, None)
+
+
+def test_stt_observability_tolerates_missing_language_and_text():
+    from pipecat.frames.frames import TextFrame, TranscriptionFrame
+    from app.services.pipecat_pipeline import SttLanguageHintProcessor
+
+    call_sid = "c_stt2"
+    _seed_session(call_sid)
+    try:
+        proc = SttLanguageHintProcessor(call_sid=call_sid)
+        # Finalized but no language and empty text -> must not crash.
+        proc._observe_transcript(
+            TranscriptionFrame(text="", user_id="u", timestamp="t", finalized=True)
+        )
+        # A non-transcript frame is simply ignored.
+        proc._observe_transcript(TextFrame(text="not a transcript"))
+    finally:
+        ACTIVE_SESSIONS.pop(call_sid, None)
+
+
+def test_stt_observability_does_not_leak_secrets():
+    from loguru import logger
+    from pipecat.frames.frames import TranscriptionFrame
+    from app.config import get_settings
+    from app.services.pipecat_pipeline import SttLanguageHintProcessor
+
+    call_sid = "c_stt3"
+    _seed_session(call_sid)
+    captured: list[str] = []
+    # Render structured `extra` fields so the assertion sees the logged transcript.
+    sink_id = logger.add(captured.append, level="DEBUG", format="{message} {extra}")
+    try:
+        proc = SttLanguageHintProcessor(call_sid=call_sid)
+        proc._observe_transcript(
+            TranscriptionFrame(text="pen please", user_id="u", timestamp="t", finalized=True)
+        )
+        blob = "".join(captured)
+        assert "pen please" in blob                          # transcript IS logged
+        assert get_settings().deepgram_api_key not in blob   # but never the API key
+    finally:
+        logger.remove(sink_id)
+        ACTIVE_SESSIONS.pop(call_sid, None)

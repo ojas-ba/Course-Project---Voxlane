@@ -37,7 +37,10 @@
         <td class="wrap-text">{{ r.user_text }}</td>
         <td class="wrap-text">{{ r.assistant_text }}</td>
         <td><span class="muted">{{ r.detected_language or '—' }} → </span>{{ r.response_language or '—' }}</td>
-        <td>{{ latbadge(r.user_stop_to_first_audio_ms if r.user_stop_to_first_audio_ms is defined else r.primary_latency_ms) }}</td>
+        <td>
+          {{ latbadge(r.user_stop_to_first_audio_ms if r.user_stop_to_first_audio_ms is defined else r.primary_latency_ms) }}
+          {% if r.merged_user_turn_ids %}<br><span class="muted">earliest anchor</span><br><span class="muted">latest</span> {{ latbadge(r.latest_user_stop_to_first_audio_ms) }}{% endif %}
+        </td>
         <td>{% if r.bot_was_speaking_when_user_stopped %}<span class="badge warn">yes</span>{% else %}<span class="muted">no</span>{% endif %}</td>
         <td class="err">{{ (r.error_stage ~ ': ' ~ (r.error_message or '')) if r.error_stage else '' }}</td>
       </tr>
@@ -46,19 +49,34 @@
         <td colspan="6" style="border-bottom:1px solid var(--border);">
           {{ chip('User→EOT', r.user_stop_to_eot_ms, warn=400, crit=1000) }}
           {{ chip('EOT→Commit', r.eot_to_turn_committed_ms, warn=200, crit=800) }}
-          {{ chip('Commit→LLM start', r.turn_committed_to_llm_start_ms) }}
+          {% if r.merged_user_turn_ids %}
+            {# Merged: earliest is inflated by the inter-utterance pause; latest is
+               the real backend delay (LAT-1). #}
+            {{ chip('earliest Commit→LLM', r.turn_committed_to_llm_start_ms) }}
+            {{ chip('latest Commit→LLM', r.latest_turn_committed_to_llm_start_ms) }}
+          {% else %}
+            {{ chip('Commit→LLM start', r.turn_committed_to_llm_start_ms) }}
+          {% endif %}
           {{ chip('User→LLM start', r.user_stop_to_llm_start_ms) }}
           {{ chip('LLM TTFB', r.llm_ttfb_ms, warn=1200, crit=3000) }}
           {{ chip('LLM total', r.llm_total_ms, warn=1500, crit=4000) }}
-          {{ chip('LLM→TTS', r.llm_end_to_tts_start_ms, warn=300, crit=1000) }}
+          {# LLM→TTS can be ≤0 under streaming (TTS begins the sentence before the
+             LLM's end frame) — show as overlap, not a scary negative latency (MET-1). #}
+          {% if r.llm_end_to_tts_start_ms is number and r.llm_end_to_tts_start_ms <= 0 %}
+            <span class="chip" title="TTS began before the LLM end frame — healthy streaming overlap">LLM→TTS <b>overlap {{ '%.0f' % (-r.llm_end_to_tts_start_ms) }}</b></span>
+          {% else %}
+            {{ chip('LLM→TTS', r.llm_end_to_tts_start_ms, warn=300, crit=1000) }}
+          {% endif %}
           {{ chip('TTS first', r.tts_first_audio_ms, warn=400, crit=1000) }}
           {{ chip('Memory', r.memory_processor_duration_ms, warn=50, crit=200) }}
           {% if r.merged_user_turn_ids %}
             {{ chip('earliest→audio', r.earliest_user_stop_to_first_audio_ms) }}
             {{ chip('latest→audio', r.latest_user_stop_to_first_audio_ms) }}
           {% endif %}
-          {% if r.stt_ready_before_user_turn is defined and not r.stt_ready_before_user_turn %}
-            <span class="chip crit">STT not ready at user turn</span>
+          {% if r.stt_ready_before_user_turn is defined %}
+            {% if r.stt_ready_before_user_turn is none %}<span class="chip">STT ready: unknown</span>
+            {% elif r.stt_ready_before_user_turn %}<span class="chip">STT ready: yes</span>
+            {% else %}<span class="chip crit">STT ready: no</span>{% endif %}
           {% endif %}
           {% if r.merged_user_texts %}
             <div class="muted" style="margin-top:.35rem;">

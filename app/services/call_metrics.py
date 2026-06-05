@@ -82,7 +82,7 @@ class TurnMetricsObserver(BaseObserver):
         user_text: str,
         stt_eot_received_at: float,
         turn_committed_at: float,
-        stt_ready: bool = True,
+        stt_ready: bool | None = True,
     ) -> None:
         """Queue a finalized user turn (awaiting the bot's response to time it)."""
         user_stopped = self._pending_user_stopped_at
@@ -117,7 +117,9 @@ class TurnMetricsObserver(BaseObserver):
                 "bot_started_speaking_at": None,
                 "bot_stopped_speaking_at": None,
                 "bot_was_speaking_when_user_stopped": bool(bot_was_speaking),
-                "stt_ready_before_user_turn": bool(stt_ready),
+                # Tri-state: True (connected before this turn) / False (not yet) /
+                # None (unknown). NOT a one-way startup latch (OBS-1).
+                "stt_ready_before_user_turn": stt_ready,
                 "memory_processor_duration_ms": None,
                 "context_message_count": None,
                 "error_stage": None,
@@ -215,11 +217,20 @@ class TurnMetricsObserver(BaseObserver):
         self._pending_turns = []
         merged = dict(turns[0])
         stops = [t["user_stopped_speaking_at"] for t in turns if t["user_stopped_speaking_at"] is not None]
+        commits = [t["turn_committed_at"] for t in turns if t.get("turn_committed_at") is not None]
         merged["latest_user_stopped_speaking_at"] = max(stops) if stops else merged["user_stopped_speaking_at"]
+        # Earliest/latest commit anchors. For a single turn these equal
+        # turn_committed_at; for a merged turn the *latest* is the commit of the
+        # sub-utterance that actually triggered the LLM, so latest-anchored
+        # Commit->LLM-start is the real backend delay (the earliest-anchored one
+        # is inflated by the human pause between sub-utterances) — LAT-1.
+        merged["earliest_turn_committed_at"] = min(commits) if commits else merged.get("turn_committed_at")
+        merged["latest_turn_committed_at"] = max(commits) if commits else merged.get("turn_committed_at")
         if len(turns) > 1:
             merged["merged_user_turn_ids"] = [t["turn_id"] for t in turns]
             merged["merged_user_texts"] = [t["user_text"] for t in turns]
             merged["merged_user_stop_times"] = stops
+            merged["merged_turn_commit_times"] = commits
             merged["user_text"] = "\n".join(t["user_text"] for t in turns if t["user_text"])
             if stops:
                 merged["user_stopped_speaking_at"] = min(stops)  # earliest = primary anchor
@@ -278,12 +289,19 @@ class TurnMetricsObserver(BaseObserver):
         first_audio = rec["first_audio_frame_sent_at"]
         earliest_stop = rec["user_stopped_speaking_at"]
         latest_stop = rec.get("latest_user_stopped_speaking_at", earliest_stop)
+        earliest_commit = rec.get("earliest_turn_committed_at", rec["turn_committed_at"])
+        latest_commit = rec.get("latest_turn_committed_at", rec["turn_committed_at"])
 
         # Stage breakdown — each delta localizes time to ONE segment.
         rec["user_stop_to_eot_ms"] = _ms(rec["stt_eot_received_at"], earliest_stop)
         rec["eot_to_turn_committed_ms"] = _ms(rec["turn_committed_at"], rec["stt_eot_received_at"])
         rec["user_stop_to_llm_start_ms"] = _ms(rec["llm_request_started_at"], earliest_stop)
         rec["turn_committed_to_llm_start_ms"] = _ms(rec["llm_request_started_at"], rec["turn_committed_at"])
+        # Earliest vs latest commit -> LLM start. For merged turns the earliest is
+        # inflated by the inter-utterance pause; the latest is the true backend
+        # delay. For normal turns both equal turn_committed_to_llm_start_ms (LAT-1).
+        rec["earliest_turn_committed_to_llm_start_ms"] = _ms(rec["llm_request_started_at"], earliest_commit)
+        rec["latest_turn_committed_to_llm_start_ms"] = _ms(rec["llm_request_started_at"], latest_commit)
         rec["llm_ttfb_ms"] = _ms(rec["llm_first_token_or_text_at"], rec["llm_request_started_at"])
         rec["llm_total_ms"] = _ms(rec["llm_completed_at"], rec["llm_request_started_at"])
         rec["llm_end_to_tts_start_ms"] = _ms(rec["tts_request_started_at"], rec["llm_completed_at"])

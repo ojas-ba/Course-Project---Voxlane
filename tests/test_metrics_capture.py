@@ -172,10 +172,81 @@ def test_merged_turn_stores_earliest_latest_and_subturns():
     assert rec["merged_user_turn_ids"] == [3, 4]
     assert rec["merged_user_texts"] == ["Hello.", "Computer science."]
     assert len(rec["merged_user_stop_times"]) == 2
+    assert rec["merged_turn_commit_times"] == [1.0, 2.0]
     assert rec["earliest_user_stop_to_first_audio_ms"] is not None
     assert rec["latest_user_stop_to_first_audio_ms"] is not None
     # The latest sub-stop is later, so its latency is <= the earliest-anchored one.
     assert rec["latest_user_stop_to_first_audio_ms"] <= rec["earliest_user_stop_to_first_audio_ms"]
+    # Latest commit anchor (2.0) is later than earliest (1.0), so the latest
+    # Commit->LLM-start (the real backend delay) is the smaller number (LAT-1).
+    assert rec["latest_turn_committed_to_llm_start_ms"] < rec["earliest_turn_committed_to_llm_start_ms"]
+
+
+def test_merged_turn_earliest_and_latest_commit_to_llm_start():
+    # LAT-1: earliest commit (first sub-utterance) inflates Commit->LLM start by
+    # the inter-utterance pause; the latest commit gives the real backend delay.
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    rec = {
+        "turn_id": 3, "user_text": "a\nb", "assistant_text": "ok",
+        "detected_language": "en", "response_language": "en",
+        "user_stopped_speaking_at": 1.0, "latest_user_stopped_speaking_at": 9.0,
+        "user_stopped_is_eot_fallback": False,
+        "stt_eot_received_at": 1.0, "turn_committed_at": 1.0,
+        "earliest_turn_committed_at": 1.0, "latest_turn_committed_at": 9.0,
+        "merged_user_turn_ids": [3, 4],
+        "llm_request_started_at": 10.0, "llm_first_token_or_text_at": 10.4,
+        "llm_completed_at": 10.5, "tts_request_started_at": 10.55,
+        "first_audio_frame_sent_at": 10.6, "error_stage": None, "error_message": None,
+    }
+    obs._emit(rec)
+    r = out[0]
+    assert r["earliest_turn_committed_to_llm_start_ms"] == round((10.0 - 1.0) * 1000, 1)  # 9000 (inflated)
+    assert r["latest_turn_committed_to_llm_start_ms"] == round((10.0 - 9.0) * 1000, 1)    # 1000 (real)
+    assert r["earliest_user_stop_to_first_audio_ms"] == round((10.6 - 1.0) * 1000, 1)
+    assert r["latest_user_stop_to_first_audio_ms"] == round((10.6 - 9.0) * 1000, 1)
+
+
+def test_normal_turn_latest_commit_equals_committed_to_llm_start():
+    # For a non-merged turn, earliest==latest==turn_committed_to_llm_start_ms, so
+    # the UI's latest-anchored value is always correct for normal turns too.
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    rec = {
+        "turn_id": 1, "user_text": "x", "assistant_text": "y",
+        "detected_language": "en", "response_language": "en",
+        "user_stopped_speaking_at": 100.0, "user_stopped_is_eot_fallback": False,
+        "stt_eot_received_at": 100.0, "turn_committed_at": 100.0,
+        "llm_request_started_at": 100.5, "llm_first_token_or_text_at": 100.9,
+        "llm_completed_at": 101.0, "tts_request_started_at": 101.05,
+        "first_audio_frame_sent_at": 101.1, "error_stage": None, "error_message": None,
+    }
+    obs._emit(rec)
+    r = out[0]
+    assert r["turn_committed_to_llm_start_ms"] == round((100.5 - 100.0) * 1000, 1)
+    assert r["latest_turn_committed_to_llm_start_ms"] == r["turn_committed_to_llm_start_ms"]
+    assert r["earliest_turn_committed_to_llm_start_ms"] == r["turn_committed_to_llm_start_ms"]
+
+
+def test_negative_llm_end_to_tts_is_preserved_not_clamped():
+    # MET-1: under streaming, TTS can start before the LLM end frame -> the metric
+    # is legitimately negative (overlap). It must be PRESERVED, never clamped, so a
+    # real (large positive) hand-off stall stays visible.
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    rec = {
+        "turn_id": 1, "user_text": "x", "assistant_text": "y",
+        "detected_language": "en", "response_language": "en",
+        "user_stopped_speaking_at": 100.0, "user_stopped_is_eot_fallback": False,
+        "stt_eot_received_at": 100.0, "turn_committed_at": 100.0,
+        "llm_request_started_at": 100.5, "llm_first_token_or_text_at": 100.9,
+        "llm_completed_at": 101.0, "tts_request_started_at": 100.99,  # TTS started before LLM end
+        "first_audio_frame_sent_at": 101.1, "error_stage": None, "error_message": None,
+    }
+    obs._emit(rec)
+    r = out[0]
+    assert r["llm_end_to_tts_start_ms"] == round((100.99 - 101.0) * 1000, 1)
+    assert r["llm_end_to_tts_start_ms"] < 0
 
 
 def test_bot_was_speaking_when_user_stopped_flag():

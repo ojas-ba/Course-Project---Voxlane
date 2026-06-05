@@ -137,6 +137,12 @@ def fallback_response_language(state: dict[str, Any] | None) -> str:
     return DEFAULT_LANGUAGE
 
 
+# NOTE (LANG-2, deferred by design): the response language currently mirrors the
+# latest user turn (Option A) — the model re-decides every turn from this weak
+# hint. Making an explicit "speak English from now on" request *persist*
+# (Option B) would need a sticky pinned_response_language, set on detected
+# switch-intent, that overrides this hint until the user changes it again. That is
+# a product decision, not a confirmed bug, so it is intentionally NOT implemented.
 def language_hint_line(state: dict[str, Any] | None) -> str:
     """A short weak-hint line for the prompt (the model still decides)."""
     code = _normalize_code((state or {}).get("last_user_language")) or DEFAULT_LANGUAGE
@@ -152,6 +158,27 @@ _PREFIX_CANDIDATES = ("<en>", "<hi>")
 # Strips a leading, well-formed-ish ``<...>`` fragment (used ONLY on the fallback
 # path, so a malformed tag like ``<eng>`` / ``<<en>>`` is never spoken).
 _FALLBACK_TAGLIKE_RE = re.compile(r"^\s*<[^>]{0,12}>\s*")
+
+
+def strip_language_prefix_tag(text: str) -> str:
+    """Strip a leading, well-formed ``<en>``/``<hi>`` tag off a complete line.
+
+    Used for the greeting, which is produced by a SEPARATE one-shot LLM call and
+    spoken via ``TTSSpeakFrame`` — it never passes through the
+    ``LanguagePrefixProcessor``, so a leaked tag must be removed here before the
+    greeting is spoken or stored. Returns the text unchanged when there is no
+    leading tag.
+
+        "<en>Hi there" -> "Hi there"
+        "<hi> Namaste" -> "Namaste"
+        "Hi there"     -> "Hi there"
+    """
+    if not text:
+        return text
+    match = _PREFIX_RE.match(text)
+    if match is not None:
+        return text[match.end():].lstrip()
+    return text
 
 
 def sanitize_prefix_fallback_text(text: str) -> str:

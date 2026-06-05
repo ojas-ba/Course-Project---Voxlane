@@ -136,6 +136,7 @@ def _parse_config_form(form: Any, base: RuntimeConfig) -> RuntimeConfig:
         "eot_threshold": f("stt_eot_threshold", base.stt.eot_threshold),
         "eot_timeout_ms": i("stt_eot_timeout_ms", base.stt.eot_timeout_ms),
         "defer_connect_on_start": b("stt_defer_connect_on_start", base.stt.defer_connect_on_start),
+        "turn_stop_timeout_ms": i("stt_turn_stop_timeout_ms", base.stt.turn_stop_timeout_ms),
     }
     data["llm"] = {
         "provider": "cerebras",

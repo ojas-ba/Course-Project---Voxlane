@@ -27,12 +27,21 @@
           <p class="hint">Silence after speech that force-ends a turn. Too low cuts mid-sentence on pauses.</p>
         </div>
       </div>
-      <label>Defer connect on start</label>
-      <select name="stt_defer_connect_on_start">
-        <option value="true" {{ 'selected' if config.stt.defer_connect_on_start }}>true</option>
-        <option value="false" {{ 'selected' if not config.stt.defer_connect_on_start }}>false</option>
-      </select>
-      <p class="hint">Connect the Flux socket in the background so the greeting isn't blocked ~1s. Keep <code>true</code>.</p>
+      <div class="row">
+        <div>
+          <label>Defer connect on start</label>
+          <select name="stt_defer_connect_on_start">
+            <option value="true" {{ 'selected' if config.stt.defer_connect_on_start }}>true</option>
+            <option value="false" {{ 'selected' if not config.stt.defer_connect_on_start }}>false</option>
+          </select>
+          <p class="hint">Connect the Flux socket in the background so the greeting isn't blocked ~1s. Keep <code>true</code>.</p>
+        </div>
+        <div>
+          <label>Turn stop debounce timeout (ms)</label>
+          <input name="stt_turn_stop_timeout_ms" value="{{ config.stt.turn_stop_timeout_ms }}" />
+          <p class="hint">Controls Pipecat's post-STT delay before triggering the LLM (NOT Deepgram <code>eot_timeout_ms</code>). Lower values reduce latency but may increase fragmented turns. Range 100–1000; default <code>500</code>.</p>
+        </div>
+      </div>
     </fieldset>
 
     <fieldset><legend>LLM — Cerebras</legend>
@@ -45,7 +54,8 @@
           <label>Max tokens</label><input name="llm_max_tokens" value="{{ config.llm.max_tokens }}" />
           <p class="hint">Caps reply length. Smaller = faster, shorter phone replies.</p>
         </div>
-        <div><label>Request timeout (s)</label><input name="llm_request_timeout_seconds" value="{{ config.llm.request_timeout_seconds }}" /></div>
+        <div><label>Request timeout (s)</label><input name="llm_request_timeout_seconds" value="{{ config.llm.request_timeout_seconds }}" />
+          <p class="hint">Hard timeout per LLM request (wired to the Cerebras client) and the bound on outbound greeting generation.</p></div>
       </div>
     </fieldset>
 

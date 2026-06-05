@@ -89,6 +89,17 @@ def test_policy_mentions_both_tags():
     assert "<hi>" in lang.RESPONSE_LANGUAGE_POLICY
 
 
+def test_strip_language_prefix_tag():
+    # LANG-1: greeting text bypasses the prefix processor, so a leaked tag must be
+    # strippable here. Well-formed leading <en>/<hi> tags are removed; plain text
+    # is left intact.
+    assert lang.strip_language_prefix_tag("<en>Hi there") == "Hi there"
+    assert lang.strip_language_prefix_tag("<hi> Namaste") == "Namaste"
+    assert lang.strip_language_prefix_tag("<EN> Hello") == "Hello"
+    assert lang.strip_language_prefix_tag("Hi there") == "Hi there"
+    assert lang.strip_language_prefix_tag("") == ""
+
+
 def test_sanitize_prefix_fallback_strips_malformed_tags():
     assert lang.sanitize_prefix_fallback_text("<eng> hello") == "hello"
     assert lang.sanitize_prefix_fallback_text("<<en>> hello") == "hello"

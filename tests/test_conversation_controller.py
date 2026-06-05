@@ -21,6 +21,21 @@ def test_greeting_validation_rejects_simulated_speaker_label():
         validate_greeting_text("Assistant: Hello there, how can I help?")
 
 
+def test_greeting_validation_strips_leaked_language_prefix():
+    # LANG-1: small models leak the <en>/<hi> tag into the greeting (the prompt's
+    # "do not include <en>" primes it). The greeting bypasses LanguagePrefixProcessor,
+    # so validate_greeting_text must strip it before it is spoken or stored.
+    assert validate_greeting_text("<en>Hi there, how can I help you today?") == (
+        "Hi there, how can I help you today?"
+    )
+    assert validate_greeting_text("<hi> Namaste, main aapki kaise madad karun?") == (
+        "Namaste, main aapki kaise madad karun?"
+    )
+    # A clean greeting (no tag) is unchanged.
+    clean = "Hello, I'm calling about your recent order."
+    assert validate_greeting_text(clean) == clean
+
+
 def test_legacy_turn_decision_api_is_removed():
     assert not hasattr(conversation_controller, "ConversationRuntimeState")
     assert not hasattr(conversation_controller, "TurnDecision")

@@ -21,6 +21,7 @@ from pipecat.services.cerebras.llm import CerebrasLLMService, CerebrasLLMSetting
 
 from app.config import Settings
 from app.runtime import ConfigSnapshot
+from app.services import language as lang
 
 MAX_ASSISTANT_TEXT_CHARS = 320
 
@@ -130,6 +131,11 @@ def validate_greeting_text(text: str) -> str:
     """
 
     cleaned = _normalize_text(text)
+    # The greeting bypasses LanguagePrefixProcessor (it's spoken via TTSSpeakFrame),
+    # so strip any leaked <en>/<hi> tag here before it is spoken or stored. The
+    # greeting prompt's "do not include <en>" instruction primes small models to
+    # emit exactly that, so we never rely on the prompt alone (LANG-1).
+    cleaned = lang.strip_language_prefix_tag(cleaned)
     if not _is_valid_assistant_text(cleaned):
         raise ValueError("generated greeting failed voice safety validation")
     return cleaned

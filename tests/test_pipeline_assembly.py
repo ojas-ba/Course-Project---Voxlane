@@ -2,11 +2,15 @@ import copy
 
 from unittest.mock import MagicMock
 
+import pytest
+from pydantic import ValidationError
+
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.cerebras.llm import CerebrasLLMService
 from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 
 from app.config import get_settings
+from app.models.runtime_config_models import STTCfg
 from app.runtime import build_config_snapshot
 from app.services.call_metrics import TurnMetricsObserver
 from app.services.deferred_flux_stt import DeferredConnectDeepgramFluxSTTService
@@ -16,8 +20,10 @@ from app.services.pipecat_pipeline import (
     SttLanguageHintProcessor,
     _build_llm,
     _build_stt,
+    _build_user_turn_strategies,
     _llm_cfg,
     _stt_cfg,
+    _stt_ready_state,
 )
 
 
@@ -75,6 +81,64 @@ def test_pipeline_order_has_prefix_between_llm_and_tts():
     # AFTER transport.output() [8].
     assert procs[4] is not procs[9]
     assert procs[8] is transport.output.return_value
+
+
+def test_turn_stop_timeout_default_is_500_and_range_enforced():
+    # LAT-2: default preserves current behavior; out-of-range is rejected so the
+    # /config save fails loudly rather than silently clamping.
+    assert STTCfg().turn_stop_timeout_ms == 500
+    with pytest.raises(ValidationError):
+        STTCfg(turn_stop_timeout_ms=50)     # below minimum (100)
+    with pytest.raises(ValidationError):
+        STTCfg(turn_stop_timeout_ms=1500)   # above maximum (1000)
+
+
+def test_turn_stop_strategy_uses_configured_timeout():
+    # The configured ms wires straight into ExternalUserTurnStopStrategy(timeout=s).
+    s200 = _build_user_turn_strategies(turn_stop_timeout_ms=200)
+    assert s200.stop[0]._timeout == 0.2
+    s500 = _build_user_turn_strategies(turn_stop_timeout_ms=500)
+    assert s500.stop[0]._timeout == 0.5
+
+
+def test_aggregator_pair_threads_turn_stop_timeout_from_config():
+    from app.services.pipecat_pipeline import _build_pipeline_processors
+    settings = get_settings()
+    snap = copy.deepcopy(build_config_snapshot(settings))
+    snap["runtime_config"]["stt"]["turn_stop_timeout_ms"] = 200
+    transport = MagicMock()
+    obs = TurnMetricsObserver(on_record=lambda r: None)
+    procs = _build_pipeline_processors(
+        transport=transport, snapshot=snap, settings=settings,
+        call_sid="c1", stream_sid="s1", metrics_observer=obs,
+    )
+    user_agg = procs[4]
+    assert user_agg._params.user_turn_strategies.stop[0]._timeout == 0.2
+
+
+def test_build_llm_wires_request_timeout_seconds():
+    # LLM-2: request_timeout_seconds must reach the Cerebras client (retry_timeout_secs),
+    # otherwise the config field is a lie and the 5.0s base default silently applies.
+    settings = get_settings()
+    snap = copy.deepcopy(build_config_snapshot(settings))
+    snap["runtime_config"]["llm"]["request_timeout_seconds"] = 7.5
+    llm = _build_llm(snap, settings)
+    assert llm._retry_timeout_secs == 7.5
+
+
+def test_stt_ready_state_is_tri_state_not_a_latch():
+    # OBS-1: readiness is per-turn from connected_at, not a one-way startup latch.
+    class _Svc:
+        pass
+
+    svc = _Svc()
+    svc.connected_at = 100.0
+    assert _stt_ready_state(svc, 200.0) is True    # connected before this turn
+    assert _stt_ready_state(svc, 50.0) is False     # turn happened before connect
+    svc.connected_at = None
+    assert _stt_ready_state(svc, 200.0) is None      # connect not observed -> unknown
+    non_deferred = _Svc()                            # no connected_at attribute
+    assert _stt_ready_state(non_deferred, 200.0) is True
 
 
 def test_user_muted_until_first_bot_complete_during_greeting():

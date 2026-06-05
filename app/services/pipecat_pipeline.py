@@ -35,6 +35,7 @@ from typing import Any, Literal
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
+    InterimTranscriptionFrame,
     TranscriptionFrame,
     TTSSpeakFrame,
 )
@@ -57,7 +58,9 @@ from pipecat.turns.user_mute import (
     AlwaysUserMuteStrategy,
     MuteUntilFirstBotCompleteUserMuteStrategy,
 )
-from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
+from pipecat.turns.user_start import ExternalUserTurnStartStrategy
+from pipecat.turns.user_stop import ExternalUserTurnStopStrategy
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from app.config import Settings, V1_SAMPLE_RATE
 from app.models.conversation_models import TurnEvent
@@ -146,6 +149,10 @@ def _build_llm(snapshot: ConfigSnapshot, settings: Settings) -> CerebrasLLMServi
     """Construct the Cerebras GPT-OSS LLM service from the runtime config."""
 
     cfg = _llm_cfg(snapshot)
+    # request_timeout_seconds is the real per-request timeout: OpenAI/Cerebras
+    # base uses it as ``retry_timeout_secs`` for ``chat.completions.create``.
+    # Passing it here makes the config field truthful for the in-call LLM (it was
+    # previously unwired, so the 5.0s base default silently applied). LLM-2.
     return CerebrasLLMService(
         api_key=settings.cerebras_api_key,
         settings=CerebrasLLMSettings(
@@ -153,6 +160,7 @@ def _build_llm(snapshot: ConfigSnapshot, settings: Settings) -> CerebrasLLMServi
             temperature=cfg.get("temperature", 0.7),
             max_tokens=cfg.get("max_tokens", 160),
         ),
+        retry_timeout_secs=float(cfg.get("request_timeout_seconds", 10.0)),
     )
 
 
@@ -179,9 +187,30 @@ def _user_mute_strategies() -> list[Any]:
     ]
 
 
-def _build_aggregator_pair(context: LLMContext) -> LLMContextAggregatorPair:
+def _build_user_turn_strategies(*, turn_stop_timeout_ms: int) -> UserTurnStrategies:
+    """External turn strategies with a configurable post-STT debounce.
+
+    The user turn is driven externally by Flux EOT (UserStoppedSpeakingFrame +
+    finalized TranscriptionFrame). Pipecat's ``ExternalUserTurnStopStrategy``
+    default debounce is 500ms; because ``UserStoppedSpeakingFrame`` (a SystemFrame)
+    overtakes the queued finalized ``TranscriptionFrame``, the strategy's immediate
+    trigger misses and that timeout — not the immediate path — is what fires the
+    LLM. So it is a fixed per-turn pre-LLM delay. Exposing it via
+    ``stt.turn_stop_timeout_ms`` lets us tune and live-validate it without a
+    redeploy (LAT-2). NOTE: this is NOT Deepgram endpointing (``eot_timeout_ms``);
+    it is the post-STT user-turn debounce.
+    """
+    return UserTurnStrategies(
+        start=[ExternalUserTurnStartStrategy()],
+        stop=[ExternalUserTurnStopStrategy(timeout=turn_stop_timeout_ms / 1000.0)],
+    )
+
+
+def _build_aggregator_pair(
+    context: LLMContext, *, turn_stop_timeout_ms: int = 500
+) -> LLMContextAggregatorPair:
     user_params = LLMUserAggregatorParams(
-        user_turn_strategies=ExternalUserTurnStrategies(),
+        user_turn_strategies=_build_user_turn_strategies(turn_stop_timeout_ms=turn_stop_timeout_ms),
         vad_analyzer=SileroVADAnalyzer(sample_rate=V1_SAMPLE_RATE),
         user_mute_strategies=_user_mute_strategies(),
     )
@@ -192,13 +221,37 @@ def _normalize_transcript_text(text: str) -> str:
     return " ".join(text.split())
 
 
+def _stt_ready_state(service: Any, turn_time: float) -> bool | None:
+    """Per-turn STT readiness (tri-state), from the actual connect time.
+
+    Replaces the old one-way "early audio dropped at startup" latch, which once
+    tripped marked EVERY later turn not-ready even though the EOT proves STT was
+    connected (OBS-1). The deferred STT exposes ``connected_at``: ready iff it
+    connected before this turn. A non-deferred service has no ``connected_at`` and
+    connects (blocking) in ``start()``, so it is ready by the first turn -> True.
+    A missing/not-yet-observed connect time is unknown (None), never False.
+    """
+    if not hasattr(service, "connected_at"):
+        return True
+    connected_at = service.connected_at
+    if connected_at is None:
+        return None
+    return connected_at <= turn_time
+
+
 class SttLanguageHintProcessor(FrameProcessor):
-    """Record the weak STT-detected language as a per-call hint.
+    """Record the weak STT-detected language as a per-call hint + log transcripts.
 
     It does NOT decide the response language and does NOT switch TTS — the LLM's
     ``<en>``/``<hi>`` tag is the authority (routed downstream by the
     LanguagePrefixProcessor). The hint feeds the prompt and the metrics
     detected-language field. Does not generate replies.
+
+    It also logs the raw STT view at DEBUG — interim and finalized transcripts
+    with their detected language — so STT-quality issues (truncation, fragmented
+    or mis-recognized Hinglish/proper nouns) can be measured directly against the
+    audio rather than inferred from the LLM's reply (STT-1). Logging only carries
+    call_sid + (clipped) transcript text + language; no secrets.
     """
 
     def __init__(self, *, call_sid: str) -> None:
@@ -209,16 +262,36 @@ class SttLanguageHintProcessor(FrameProcessor):
         self, frame: Any, direction: FrameDirection = FrameDirection.DOWNSTREAM
     ) -> None:
         await super().process_frame(frame, direction)
-        if (
-            direction == FrameDirection.DOWNSTREAM
-            and isinstance(frame, TranscriptionFrame)
-            and getattr(frame, "finalized", False)
-        ):
+        if direction == FrameDirection.DOWNSTREAM:
+            self._observe_transcript(frame)
+        await self.push_frame(frame, direction)
+
+    def _observe_transcript(self, frame: Any) -> None:
+        """Log the raw STT view (interim + final) and record the weak final hint.
+
+        Logging carries only call_sid + clipped transcript text + detected
+        language — never settings or credentials (STT-1). Tolerant of frames that
+        lack a ``language``/``text`` attribute so a malformed frame can't crash STT.
+        """
+        if isinstance(frame, InterimTranscriptionFrame):
+            logger.debug(
+                "STT interim transcript",
+                call_sid=self._call_sid,
+                language=lang.detect_language_from_transcription(frame),
+                text=_normalize_transcript_text(getattr(frame, "text", "") or "")[:160],
+            )
+        elif isinstance(frame, TranscriptionFrame) and getattr(frame, "finalized", False):
             detected = lang.detect_language_from_transcription(frame)
+            logger.debug(
+                "STT final transcript",
+                call_sid=self._call_sid,
+                language=detected,
+                finalized=True,
+                text=_normalize_transcript_text(getattr(frame, "text", "") or "")[:160],
+            )
             state = get_session_language_state(self._call_sid) or lang.new_language_state()
             lang.record_stt_language_hint(state, detected)
             set_session_language_state(self._call_sid, state)
-        await self.push_frame(frame, direction)
 
 
 class MemoryProcessor(FrameProcessor):
@@ -321,7 +394,10 @@ def _build_pipeline_processors(
     tts = _build_tts(snapshot, settings)
     llm = _build_llm(snapshot, settings)
     context = _build_context(snapshot)
-    aggregator_pair = _build_aggregator_pair(context)
+    aggregator_pair = _build_aggregator_pair(
+        context,
+        turn_stop_timeout_ms=int(_stt_cfg(snapshot).get("turn_stop_timeout_ms", 500)),
+    )
     stt_language_hint = SttLanguageHintProcessor(call_sid=call_sid)
     memory_processor = MemoryProcessor(
         call_sid=call_sid,
@@ -348,9 +424,9 @@ def _build_pipeline_processors(
             if turn is None:
                 return
             lstate = get_session_language_state(call_sid) or {}
-            # STT must be connected to have produced this EOT; the meaningful
-            # signal is whether early audio was dropped before connect.
-            stt_ready = not getattr(service, "_warned_early_audio", False)
+            # Per-turn readiness from the actual connect time (tri-state), not the
+            # startup early-audio latch which poisoned every later turn (OBS-1).
+            stt_ready = _stt_ready_state(service, now)
             logger.info(
                 "Flux end_of_turn",
                 call_sid=call_sid,
@@ -496,8 +572,12 @@ async def run_pipeline(
         await asyncio.sleep(greeting_start_delay_ms / 1000)
 
     greeting_source = prepared_greeting_text if opening_mode == "outbound" else None
-    cleaned_greeting = _normalize_transcript_text(
-        greeting_source or snapshot["INITIAL_GREETING_FALLBACK_TEXT"]
+    # Defensive: the greeting is spoken via TTSSpeakFrame and never passes through
+    # LanguagePrefixProcessor, so strip any leaked <en>/<hi> tag before it is
+    # spoken or stored (the outbound path also strips in validate_greeting_text) —
+    # LANG-1.
+    cleaned_greeting = lang.strip_language_prefix_tag(
+        _normalize_transcript_text(greeting_source or snapshot["INITIAL_GREETING_FALLBACK_TEXT"])
     )
     _record_greeting(call_sid=call_sid, greeting_text=cleaned_greeting)
     update_session_metric(call_sid, "first_tts_frame_queued_at", time.time())

@@ -18,6 +18,23 @@
   <p class="muted">“User Stop → First Audio Sent” is a server-side proxy (BotStartedSpeakingFrame); it is not the phone-speaker playback time.
     For merged turns it is anchored to the <em>earliest</em> sub-utterance — compare with “latest → audio” below.</p>
 
+  {% if eager_summary %}
+  {% macro ms(v) %}{{ ('%.0f ms' % v) if v is number else '—' }}{% endmacro %}
+  <div class="panel">
+    <h2>EagerEOT speculative probe <span class="muted">(Stage-1 measurement only — no speculative draft was run)</span></h2>
+    <div class="cards">
+      <div class="card"><div class="lbl">EagerEOT turns</div><div class="val">{{ eager_summary.eager_eot_turns }} / {{ eager_summary.total_turns }}</div></div>
+      <div class="card"><div class="lbl">Eligible turns</div><div class="val">{{ eager_summary.eligible_turns }}</div></div>
+      <div class="card"><div class="lbl">TurnResumed rate</div><div class="val">{{ '%.0f%%' % (eager_summary.turn_resumed_rate * 100) }}</div></div>
+      <div class="card"><div class="lbl">Eager/final match</div><div class="val">{{ '%.0f%%' % (eager_summary.eager_final_match_rate * 100) }}</div></div>
+      <div class="card"><div class="lbl">Median head start</div><div class="val">{{ ms(eager_summary.median_head_start_ms) }}</div></div>
+      <div class="card"><div class="lbl">Median est. saved</div><div class="val">{{ ms(eager_summary.median_estimated_saved_ms) }}</div></div>
+      <div class="card"><div class="lbl">Total est. saved</div><div class="val">{{ ms(eager_summary.total_estimated_saved_ms) }}</div></div>
+    </div>
+    <p class="muted">“Estimated saved” assumes a speculative draft's TTFB ≈ the normal LLM TTFB — an upper-bound estimate of <em>opportunity</em>, not a guaranteed saving.</p>
+  </div>
+  {% endif %}
+
   <div class="panel">
     <h2>Greeting</h2>
     <pre>{% for ev in log.get('transcript', []) %}{% if ev.phase == 'greeting' %}{{ ev.text }}{% endif %}{% endfor %}</pre>
@@ -81,6 +98,19 @@
           {% if r.merged_user_texts %}
             <div class="muted" style="margin-top:.35rem;">
               sub-turns:{% for t in r.merged_user_texts %} <span class="chip">{{ loop.index }}: {{ t }}</span>{% endfor %}
+            </div>
+          {% endif %}
+          {% if r.eager_probe %}
+            {% set ep = r.eager_probe %}
+            {% set vc = 'ok' if ep.verdict == 'eligible' else ('warn' if ep.verdict in ['wasted_turn_resumed', 'discarded_transcript_mismatch', 'missing_final_transcript'] else 'neutral') %}
+            <div class="muted" style="margin-top:.35rem;">
+              <span class="chip">Spec probe</span>
+              <span class="chip">EagerEOT: {{ 'yes' if ep.eager_eot_seen else 'no' }}</span>
+              <span class="chip">head start: {{ ('%.0f ms' % ep.head_start_ms) if ep.head_start_ms is number else '—' }}</span>
+              <span class="chip">resumed: {{ 'yes' if ep.turn_resumed_seen else 'no' }}</span>
+              <span class="chip">match: {% if ep.eager_final_match is none %}—{% else %}{{ 'yes' if ep.eager_final_match else 'no' }}{% endif %}</span>
+              <span class="chip">est. saved: {{ ('%.0f ms' % ep.estimated_saved_ms) if ep.estimated_saved_ms is number else '—' }}</span>
+              <span class="badge {{ vc }}">{{ ep.verdict }}</span>
             </div>
           {% endif %}
         </td>

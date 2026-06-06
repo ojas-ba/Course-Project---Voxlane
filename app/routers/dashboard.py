@@ -8,6 +8,7 @@ generation (or config load) fails — there is no static/canned fallback.
 import os
 import re
 import asyncio
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -137,6 +138,8 @@ def _parse_config_form(form: Any, base: RuntimeConfig) -> RuntimeConfig:
         "eot_timeout_ms": i("stt_eot_timeout_ms", base.stt.eot_timeout_ms),
         "defer_connect_on_start": b("stt_defer_connect_on_start", base.stt.defer_connect_on_start),
         "turn_stop_timeout_ms": i("stt_turn_stop_timeout_ms", base.stt.turn_stop_timeout_ms),
+        "enable_eager_eot": b("stt_enable_eager_eot", base.stt.enable_eager_eot),
+        "eager_eot_threshold": f("stt_eager_eot_threshold", base.stt.eager_eot_threshold),
     }
     data["llm"] = {
         "provider": "cerebras",
@@ -364,6 +367,71 @@ def _badge_class(ms: float | None, *, warn: float, crit: float) -> str:
     return "ok"
 
 
+def _median(xs: list[float]) -> float | None:
+    if not xs:
+        return None
+    s = sorted(xs)
+    n = len(s)
+    mid = n // 2
+    return round((s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2), 1)
+
+
+def _p95(xs: list[float]) -> float | None:
+    if not xs:
+        return None
+    s = sorted(xs)
+    # nearest-rank p95 (index ceil(0.95*n)-1)
+    idx = max(0, math.ceil(0.95 * len(s)) - 1)
+    return round(s[idx], 1)
+
+
+def _eager_probe_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Derive the call-level EagerEOT telemetry rollup from per-turn eager probes.
+
+    Returns None when no turn carried a probe (eager telemetry was off), so the UI
+    only shows the summary for calls that actually ran the probe.
+    """
+    probes = [r.get("eager_probe") for r in records if isinstance(r.get("eager_probe"), dict)]
+    if not probes:
+        return None
+    total = len(records)
+    eager = [p for p in probes if p.get("eager_eot_seen")]
+    eligible = [p for p in probes if p.get("verdict") == "eligible"]
+    # Count resumes only among eager turns so the numerator can never exceed the
+    # denominator (a TurnResumed only matters as the cancel signal for an eager).
+    resumed = [p for p in eager if p.get("turn_resumed_seen")]
+    mismatch = [p for p in probes if p.get("verdict") == "discarded_transcript_mismatch"]
+    matched = [p for p in eager if p.get("eager_final_match") is True]
+    # Only positive head starts (drop the degenerate eager-at/after-EOT cases that
+    # store a <=0 head_start) so the median/p95 reflect real head room.
+    head_starts = [
+        p["head_start_ms"] for p in eager
+        if isinstance(p.get("head_start_ms"), (int, float)) and p["head_start_ms"] > 0
+    ]
+    saved = [p["estimated_saved_ms"] for p in eligible if isinstance(p.get("estimated_saved_ms"), (int, float))]
+
+    def _rate(num: int, den: int) -> float:
+        return round(num / den, 3) if den else 0.0
+
+    return {
+        "total_turns": total,
+        "eager_eot_turns": len(eager),
+        "eligible_turns": len(eligible),
+        "turn_resumed_turns": len(resumed),
+        "transcript_mismatch_turns": len(mismatch),
+        "eager_eot_rate": _rate(len(eager), total),
+        "eligible_rate": _rate(len(eligible), total),
+        "turn_resumed_rate": _rate(len(resumed), len(eager)),
+        "eager_final_match_rate": _rate(len(matched), len(eager)),
+        "median_head_start_ms": _median(head_starts),
+        "p95_head_start_ms": _p95(head_starts),
+        "median_estimated_saved_ms": _median(saved),
+        "p95_estimated_saved_ms": _p95(saved),
+        "total_estimated_saved_ms": round(sum(saved), 1) if saved else 0.0,
+        "avg_estimated_saved_ms_per_turn": round(sum(saved) / total, 1) if total else 0.0,
+    }
+
+
 @router.get("/calls", response_class=HTMLResponse)
 async def get_calls_list(request: Request) -> HTMLResponse:
     """Render the completed-calls list with per-call latency stats."""
@@ -406,5 +474,6 @@ async def get_call_detail(request: Request, call_sid: str) -> HTMLResponse:
             "turn_records": records,
             "avg_latency": avg_latency,
             "max_latency": max_latency,
+            "eager_summary": _eager_probe_summary(records),
         },
     )

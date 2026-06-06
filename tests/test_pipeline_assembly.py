@@ -93,6 +93,36 @@ def test_turn_stop_timeout_default_is_500_and_range_enforced():
         STTCfg(turn_stop_timeout_ms=1500)   # above maximum (1000)
 
 
+def test_eager_eot_disabled_by_default_and_threshold_validated():
+    # Stage-1: off by default; the repo's first cross-field validator enforces
+    # eager_eot_threshold <= eot_threshold ONLY when eager is enabled.
+    assert STTCfg().enable_eager_eot is False
+    assert STTCfg().eager_eot_threshold is None
+    with pytest.raises(ValidationError):
+        STTCfg(enable_eager_eot=True, eager_eot_threshold=0.9, eot_threshold=0.7)  # eager > eot
+    with pytest.raises(ValidationError):
+        STTCfg(enable_eager_eot=True)  # enabled but no threshold -> required (would be inert)
+    STTCfg(enable_eager_eot=True, eager_eot_threshold=0.6, eot_threshold=0.7)   # eager <= eot ok
+    # Disabled -> validator is a no-op even with an out-of-order threshold.
+    STTCfg(enable_eager_eot=False, eager_eot_threshold=0.9, eot_threshold=0.7)
+
+
+def test_build_stt_passes_eager_threshold_only_when_enabled():
+    settings = get_settings()
+    base = copy.deepcopy(build_config_snapshot(settings))
+    # Off by default -> Flux Settings.eager_eot_threshold left unset (NOT_GIVEN sentinel).
+    assert not isinstance(_build_stt(base, settings)._settings.eager_eot_threshold, float)
+    # Enabled with a threshold -> passed through.
+    snap_on = copy.deepcopy(base)
+    snap_on["runtime_config"]["stt"]["enable_eager_eot"] = True
+    snap_on["runtime_config"]["stt"]["eager_eot_threshold"] = 0.6
+    assert _build_stt(snap_on, settings)._settings.eager_eot_threshold == 0.6
+    # Enabled but no threshold value -> still NOT passed (requires a value).
+    snap_missing = copy.deepcopy(base)
+    snap_missing["runtime_config"]["stt"]["enable_eager_eot"] = True
+    assert not isinstance(_build_stt(snap_missing, settings)._settings.eager_eot_threshold, float)
+
+
 def test_turn_stop_strategy_uses_configured_timeout():
     # The configured ms wires straight into ExternalUserTurnStopStrategy(timeout=s).
     s200 = _build_user_turn_strategies(turn_stop_timeout_ms=200)

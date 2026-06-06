@@ -42,6 +42,21 @@
           <p class="hint">Controls Pipecat's post-STT delay before triggering the LLM (NOT Deepgram <code>eot_timeout_ms</code>). Lower values reduce latency but may increase fragmented turns. Range 100–1000; default <code>500</code>.</p>
         </div>
       </div>
+      <div class="row">
+        <div>
+          <label>Enable EagerEOT telemetry</label>
+          <select name="stt_enable_eager_eot">
+            <option value="true" {{ 'selected' if config.stt.enable_eager_eot }}>true</option>
+            <option value="false" {{ 'selected' if not config.stt.enable_eager_eot }}>false</option>
+          </select>
+          <p class="hint">Stage-1 measurement only: asks Flux for EagerEndOfTurn events and records the would-be LLM head start. <strong>No speculative draft, no early speech.</strong> Default <code>false</code> (off = identical to today).</p>
+        </div>
+        <div>
+          <label>EagerEOT threshold</label>
+          <input name="stt_eager_eot_threshold" value="{{ config.stt.eager_eot_threshold if config.stt.eager_eot_threshold is not none else '' }}" />
+          <p class="hint">Confidence for the early EagerEndOfTurn signal. Must be ≤ EOT threshold; range 0.3–0.9. Only sent to Flux when EagerEOT is enabled. Leave blank for off.</p>
+        </div>
+      </div>
     </fieldset>
 
     <fieldset><legend>LLM — Cerebras</legend>

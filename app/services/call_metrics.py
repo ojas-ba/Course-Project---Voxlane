@@ -52,6 +52,11 @@ def _ms(later: float | None, earlier: float | None) -> float | None:
     return round((later - earlier) * 1000.0, 1)
 
 
+def _norm_text(text: str | None) -> str:
+    """Whitespace-collapsed, lowercased text for the eager==final comparison."""
+    return " ".join((text or "").split()).lower()
+
+
 class TurnMetricsObserver(BaseObserver):
     """Build one TurnRecord per user->bot turn and emit it via ``on_record``."""
 
@@ -86,6 +91,7 @@ class TurnMetricsObserver(BaseObserver):
         stt_eot_received_at: float,
         turn_committed_at: float,
         stt_ready: bool | None = True,
+        eager_probe: dict[str, Any] | None = None,
     ) -> None:
         """Queue a finalized user turn (awaiting the bot's response to time it)."""
         user_stopped = self._pending_user_stopped_at
@@ -101,34 +107,48 @@ class TurnMetricsObserver(BaseObserver):
         )
         self._pending_user_stopped_at = None
         self._pending_bot_was_speaking = None
-        self._pending_turns.append(
-            {
-                "turn_id": turn_id,
-                "user_text": user_text,
-                "assistant_text": "",
-                "detected_language": None,
-                "response_language": None,
-                "user_stopped_speaking_at": user_stopped,
-                "user_stopped_is_eot_fallback": user_stopped_is_fallback,
-                "stt_eot_received_at": stt_eot_received_at,
-                "turn_committed_at": turn_committed_at,
-                "llm_request_started_at": None,
-                "llm_first_token_or_text_at": None,
-                "llm_completed_at": None,
-                "tts_request_started_at": None,
-                "first_audio_frame_sent_at": None,
-                "bot_started_speaking_at": None,
-                "bot_stopped_speaking_at": None,
-                "bot_was_speaking_when_user_stopped": bool(bot_was_speaking),
-                # Tri-state: True (connected before this turn) / False (not yet) /
-                # None (unknown). NOT a one-way startup latch (OBS-1).
-                "stt_ready_before_user_turn": stt_ready,
-                "memory_processor_duration_ms": None,
-                "context_message_count": None,
-                "error_stage": None,
-                "error_message": None,
+        pending = {
+            "turn_id": turn_id,
+            "user_text": user_text,
+            "assistant_text": "",
+            "detected_language": None,
+            "response_language": None,
+            "user_stopped_speaking_at": user_stopped,
+            "user_stopped_is_eot_fallback": user_stopped_is_fallback,
+            "stt_eot_received_at": stt_eot_received_at,
+            "turn_committed_at": turn_committed_at,
+            "llm_request_started_at": None,
+            "llm_first_token_or_text_at": None,
+            "llm_completed_at": None,
+            "tts_request_started_at": None,
+            "first_audio_frame_sent_at": None,
+            "bot_started_speaking_at": None,
+            "bot_stopped_speaking_at": None,
+            "bot_was_speaking_when_user_stopped": bool(bot_was_speaking),
+            # Tri-state: True (connected before this turn) / False (not yet) /
+            # None (unknown). NOT a one-way startup latch (OBS-1).
+            "stt_ready_before_user_turn": stt_ready,
+            "memory_processor_duration_ms": None,
+            "context_message_count": None,
+            "error_stage": None,
+            "error_message": None,
+        }
+        # Stage-1 EagerEOT telemetry: store the raw probe + THIS sub-turn's final
+        # transcript/time so the match + head-start are computed per sub-turn at
+        # finalize. Only present when eager telemetry is enabled (else the key is
+        # omitted and records look exactly as before).
+        if eager_probe is not None:
+            pending["eager_probe"] = {
+                "eager_eot_seen": bool(eager_probe.get("eager_eot_seen")),
+                "eager_eot_at": eager_probe.get("eager_eot_at"),
+                "eager_transcript": eager_probe.get("eager_transcript", ""),
+                "turn_resumed_seen": bool(eager_probe.get("turn_resumed_seen")),
+                "turn_resumed_at": eager_probe.get("turn_resumed_at"),
+                "resumed_since_eager": bool(eager_probe.get("resumed_since_eager")),
+                "final_eot_at": stt_eot_received_at,
+                "final_transcript": user_text,
             }
-        )
+        self._pending_turns.append(pending)
 
     def note_language(self, *, detected_language: str | None, response_language: str | None) -> None:
         if self._open is not None:
@@ -251,6 +271,10 @@ class TurnMetricsObserver(BaseObserver):
             merged["bot_was_speaking_when_user_stopped"] = any(
                 t["bot_was_speaking_when_user_stopped"] for t in turns
             )
+            # EagerEOT probe: the LAST sub-turn's EndOfTurn is the one that triggered
+            # the LLM, so its eager probe is the relevant head-start measurement.
+            if turns[-1].get("eager_probe") is not None:
+                merged["eager_probe"] = turns[-1]["eager_probe"]
         merged["llm_request_started_at"] = now
         merged["response_id"] = self._response_seq
         merged["_llm_ended"] = False
@@ -330,7 +354,76 @@ class TurnMetricsObserver(BaseObserver):
         rec["primary_latency_ms"] = rec["user_stop_to_first_audio_ms"]
         rec["eot_delay_ms"] = rec["user_stop_to_eot_ms"]
         rec["commit_delay_ms"] = rec["eot_to_turn_committed_ms"]
+
+        # Stage-1 EagerEOT telemetry (only present when enabled).
+        if isinstance(rec.get("eager_probe"), dict):
+            self._finalize_eager_probe(rec)
+
         try:
             self._on_record(rec)
         except Exception:
             pass
+
+    def _finalize_eager_probe(self, rec: dict[str, Any]) -> None:
+        """Compute Stage-1 EagerEOT telemetry on the record's eager probe.
+
+        Produces hard facts (head_start_ms, eager_final_match) plus an ESTIMATED
+        saved-latency that assumes a speculative draft's TTFB would match the normal
+        LLM TTFB. NO speculative draft is ever run — this only measures the missed
+        opportunity, so ``estimated_saved_ms`` is an estimate, not a guaranteed save.
+
+        Formula (epoch seconds; ttfb in ms):
+            hypothetical_spec_first_token_at = eager_eot_at + ttfb
+            effective_spec_ready_at          = max(final_eot_at, hypothetical_spec_first_token_at)
+            estimated_saved_ms               = max(0, normal_first_token_at - effective_spec_ready_at)
+
+        Algebraically this equals (EOT->LLM-start backend gap) + min(head_start, ttfb),
+        so the estimate credits the whole commit + turn-stop-debounce window before the
+        normal first token, not just the eager head start. The max(0, ...) clamp only
+        fires on a clock reorder (LLM start stamped before the final EOT).
+        """
+        probe = rec["eager_probe"]
+        eager_at = probe.get("eager_eot_at")
+        final_at = probe.get("final_eot_at")
+        eager_seen = bool(probe.get("eager_eot_seen"))
+        resumed = bool(probe.get("resumed_since_eager"))
+        eager_txt = probe.get("eager_transcript", "")
+        final_txt = probe.get("final_transcript", "")
+        first_token_at = rec.get("llm_first_token_or_text_at")  # normal_first_token_at
+        ttfb_ms = rec.get("llm_ttfb_ms")
+
+        head_start_ms = (
+            _ms(final_at, eager_at)
+            if (eager_seen and final_at is not None and eager_at is not None)
+            else None
+        )
+        match = (_norm_text(eager_txt) == _norm_text(final_txt)) if eager_seen else None
+
+        if not eager_seen:
+            verdict, saved = "no_eager_event", None
+        elif resumed:
+            verdict, saved = "wasted_turn_resumed", 0.0
+        elif not _norm_text(final_txt):
+            verdict, saved = "missing_final_transcript", None
+        elif match is False:
+            verdict, saved = "discarded_transcript_mismatch", 0.0
+        elif head_start_ms is None or head_start_ms <= 0:
+            verdict, saved = "not_enough_head_start", 0.0
+        elif first_token_at is None or ttfb_ms is None:
+            # Eager fired and matched, but the normal LLM never produced a first
+            # token (e.g. a superseded turn), so the saving is not measurable.
+            verdict, saved = "eligible_unmeasurable", None
+        else:
+            hypothetical_spec_first_token_at = eager_at + (ttfb_ms / 1000.0)
+            effective_spec_ready_at = max(final_at, hypothetical_spec_first_token_at)
+            saved = round(max(0.0, (first_token_at - effective_spec_ready_at) * 1000.0), 1)
+            verdict = "eligible"
+
+        probe["head_start_ms"] = head_start_ms
+        probe["eager_final_match"] = match
+        probe["estimated_saved_ms"] = saved
+        probe["verdict"] = verdict
+        # Drop full transcripts (the turn's user_text already holds the final one);
+        # keep short previews to avoid bloating persisted records.
+        probe["eager_transcript_preview"] = (probe.pop("eager_transcript", "") or "")[:80]
+        probe["final_transcript_preview"] = (probe.pop("final_transcript", "") or "")[:80]

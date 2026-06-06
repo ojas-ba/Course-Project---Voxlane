@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.config import Settings
 
@@ -45,6 +45,30 @@ class STTCfg(BaseModel):
     # pre-LLM delay. Default 500 preserves current behavior; lower = less latency
     # but too low risks splitting a turn whose final transcript arrives in pieces.
     turn_stop_timeout_ms: int = Field(default=500, ge=100, le=1000)
+    # --- EagerEndOfTurn telemetry (Stage 1; OFF by default — no behavior change) ---
+    # When enabled, Deepgram Flux is asked with this threshold and begins emitting
+    # EagerEndOfTurn/TurnResumed events. Stage 1 ONLY measures the would-be LLM head
+    # start; it never starts a speculative draft and never speaks early. The Flux
+    # rule is eager_eot_threshold <= eot_threshold. None = not sent (eager off).
+    enable_eager_eot: bool = False
+    eager_eot_threshold: float | None = Field(default=None, ge=0.3, le=0.9)
+
+    @model_validator(mode="after")
+    def _validate_eager_threshold(self) -> "STTCfg":
+        # Only constrains when eager is actually enabled, so it is a no-op for the
+        # disabled default and for all existing stored configs.
+        if self.enable_eager_eot:
+            if self.eager_eot_threshold is None:
+                # Without a threshold the feature would silently collect nothing
+                # (Flux is never asked for eager events) — surface that as a save
+                # error instead of a config that looks on but does nothing.
+                raise ValueError("eager_eot_threshold is required when enable_eager_eot is true")
+            if self.eager_eot_threshold > self.eot_threshold:
+                raise ValueError(
+                    "eager_eot_threshold must be <= eot_threshold "
+                    f"(got {self.eager_eot_threshold} > {self.eot_threshold})"
+                )
+        return self
 
 
 class LLMCfg(BaseModel):

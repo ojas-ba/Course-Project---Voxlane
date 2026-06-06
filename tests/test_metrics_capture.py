@@ -304,6 +304,98 @@ def test_flush_emits_pending_turn_on_call_end():
     assert out[0]["error_stage"] == "no_bot_response"
 
 
+def _emit_with_probe(probe, **overrides):
+    """Run _emit on a minimal rec carrying an eager probe; return the finalized probe."""
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    rec = {
+        "turn_id": 1, "user_text": "x", "assistant_text": "y",
+        "detected_language": "en", "response_language": "en",
+        "user_stopped_speaking_at": 100.0, "user_stopped_is_eot_fallback": False,
+        "stt_eot_received_at": 100.3, "turn_committed_at": 100.35,
+        "llm_request_started_at": 100.5, "llm_first_token_or_text_at": 101.0,  # ttfb = 500ms
+        "llm_completed_at": 101.1, "tts_request_started_at": 101.15,
+        "first_audio_frame_sent_at": 101.2, "error_stage": None, "error_message": None,
+        "eager_probe": probe,
+    }
+    rec.update(overrides)
+    obs._emit(rec)
+    return out[0]["eager_probe"]
+
+
+def test_eager_probe_formula_and_eligible_verdict():
+    # eager fired 300ms before EOT; eager==final; no resume. ttfb=500ms.
+    #   hypothetical_spec_first_token = 100.0 + 0.5 = 100.5
+    #   effective_ready = max(100.3, 100.5) = 100.5
+    #   estimated_saved = (101.0 - 100.5) * 1000 = 500ms
+    ep = _emit_with_probe({
+        "eager_eot_seen": True, "eager_eot_at": 100.0, "eager_transcript": "hello world",
+        "turn_resumed_seen": False, "turn_resumed_at": None, "resumed_since_eager": False,
+        "final_eot_at": 100.3, "final_transcript": "hello world",
+    })
+    assert ep["head_start_ms"] == 300.0
+    assert ep["eager_final_match"] is True
+    assert ep["estimated_saved_ms"] == 500.0
+    assert ep["verdict"] == "eligible"
+    assert ep["eager_transcript_preview"] == "hello world"
+    # full transcripts are dropped (only previews persist)
+    assert "eager_transcript" not in ep and "final_transcript" not in ep
+
+
+def test_eager_probe_verdicts():
+    base = {
+        "eager_eot_seen": True, "eager_eot_at": 100.0, "eager_transcript": "hello world",
+        "turn_resumed_seen": False, "turn_resumed_at": None, "resumed_since_eager": False,
+        "final_eot_at": 100.3, "final_transcript": "hello world",
+    }
+    # TurnResumed -> wasted, 0 saved
+    ep = _emit_with_probe({**base, "turn_resumed_seen": True, "resumed_since_eager": True})
+    assert ep["verdict"] == "wasted_turn_resumed" and ep["estimated_saved_ms"] == 0.0
+    # eager != final -> mismatch, 0 saved
+    ep = _emit_with_probe({**base, "final_transcript": "totally different"})
+    assert ep["verdict"] == "discarded_transcript_mismatch" and ep["estimated_saved_ms"] == 0.0
+    assert ep["eager_final_match"] is False
+    # eager never fired -> no_eager_event, saved None
+    ep = _emit_with_probe({"eager_eot_seen": False})
+    assert ep["verdict"] == "no_eager_event" and ep["estimated_saved_ms"] is None
+    # head start <= 0 (eager at == final at)
+    ep = _emit_with_probe({**base, "eager_eot_at": 100.3})
+    assert ep["verdict"] == "not_enough_head_start"
+    # eligible but normal LLM produced no first token -> unmeasurable
+    ep = _emit_with_probe(base, llm_first_token_or_text_at=None)
+    assert ep["verdict"] == "eligible_unmeasurable" and ep["estimated_saved_ms"] is None
+
+
+def test_merged_turn_keeps_latest_eager_probe():
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    _push(obs, UserStoppedSpeakingFrame())
+    obs.note_user_turn(turn_id=3, user_text="first", stt_eot_received_at=1.0, turn_committed_at=1.0,
+                       eager_probe={"eager_eot_seen": True, "eager_eot_at": 0.7, "eager_transcript": "first"})
+    _push(obs, UserStoppedSpeakingFrame())
+    obs.note_user_turn(turn_id=4, user_text="second", stt_eot_received_at=2.0, turn_committed_at=2.0,
+                       eager_probe={"eager_eot_seen": True, "eager_eot_at": 1.8, "eager_transcript": "second"})
+    _push(obs, LLMFullResponseStartFrame())
+    _push(obs, LLMTextFrame("<en> ok"))
+    _push(obs, LLMFullResponseEndFrame())
+    obs.note_assistant_text("Got it.")
+    _push(obs, BotStartedSpeakingFrame())
+    ep = out[0]["eager_probe"]
+    assert ep["eager_transcript_preview"] == "second"   # latest sub-turn's probe wins
+    assert ep["final_transcript_preview"] == "second"
+
+
+def test_disabled_eager_adds_no_probe_key():
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    obs.note_user_turn(turn_id=1, user_text="x", stt_eot_received_at=1.0, turn_committed_at=1.0)  # no eager_probe
+    _push(obs, LLMFullResponseStartFrame())
+    _push(obs, LLMFullResponseEndFrame())
+    obs.note_assistant_text("ok")
+    _push(obs, BotStartedSpeakingFrame())
+    assert "eager_probe" not in out[0]   # record shape unchanged when telemetry off
+
+
 def test_response_id_is_stamped_on_record():
     out: list[dict] = []
     obs = TurnMetricsObserver(on_record=out.append)

@@ -113,6 +113,11 @@ def _build_stt(snapshot: ConfigSnapshot, settings: Settings) -> DeepgramFluxSTTS
     )
     if hints and model == MULTILINGUAL_FLUX_MODEL:
         stt_settings.language_hints = hints
+    # EagerEndOfTurn telemetry (Stage 1): only ask Flux for eager events when the
+    # flag is on. Passing eager_eot_threshold is what turns EagerEndOfTurn/
+    # TurnResumed on at the Flux server, so leaving it unset keeps behavior identical.
+    if cfg.get("enable_eager_eot") and cfg.get("eager_eot_threshold") is not None:
+        stt_settings.eager_eot_threshold = float(cfg["eager_eot_threshold"])
 
     stt_cls = (
         DeferredConnectDeepgramFluxSTTService
@@ -467,10 +472,23 @@ def _build_pipeline_processors(
     )
     turn_collector = TurnCollector(call_sid=call_sid, stream_sid=stream_sid)
 
+    # Stage-1 EagerEndOfTurn telemetry. A per-turn probe accumulator shared by the
+    # Flux turn handlers; it ONLY records timestamps + a transcript preview (no
+    # speculative LLM draft, no TTS). It is reset at start_of_turn and consumed at
+    # end_of_turn. Attached to the turn record only when eager telemetry is enabled,
+    # so with the flag off the records are exactly as today.
+    eager_enabled = bool(_stt_cfg(snapshot).get("enable_eager_eot"))
+    eager_probe: dict[str, Any] = {}
+
     if hasattr(stt, "event_handler"):
         @stt.event_handler("on_end_of_turn")
         async def _on_end_of_turn(service: Any, transcript: str) -> None:
             now = time.time()
+            # Snapshot + clear the eager probe up front so it is consumed on EVERY
+            # EndOfTurn (even a no-commit one) and can never bleed into a later turn
+            # if a StartOfTurn is missed.
+            probe_snapshot = dict(eager_probe) if eager_enabled else None
+            eager_probe.clear()
             result = turn_collector.observe(
                 TurnEvent(event_type="end_of_turn", text=transcript, timestamp=utc_now()),
                 phase="task",
@@ -501,24 +519,36 @@ def _build_pipeline_processors(
                 stt_eot_received_at=now,
                 turn_committed_at=time.time(),
                 stt_ready=stt_ready,
+                # Attach the eager probe ONLY when telemetry is enabled (already a
+                # decoupled snapshot taken + cleared at the top of this handler).
+                eager_probe=probe_snapshot,
             )
             # Language is annotated by the LanguagePrefixProcessor (from the LLM
             # tag) and resolved at metric finalize, so it is not read here.
 
-        # Lightweight visibility into Flux's turn-boundary decisions. These are
-        # diagnostic only (DEBUG) — no behavior change, no EOT tuning. They help
-        # explain incomplete-utterance turns caused by eot_timeout firing mid-speech.
+        # Flux turn-boundary events. start/eager/resumed feed the Stage-1 eager
+        # probe (timestamps + transcript preview only — no draft, no TTS) and stay
+        # DEBUG-logged for diagnostics. They never fire unless eager_eot_threshold
+        # is configured, so this is inert with the flag off.
         @stt.event_handler("on_start_of_turn")
         async def _on_start_of_turn(service: Any, *args: Any) -> None:
+            eager_probe.clear()  # new turn boundary
             logger.debug("Flux start_of_turn", call_sid=call_sid)
 
         @stt.event_handler("on_eager_end_of_turn")
         async def _on_eager_end_of_turn(service: Any, *args: Any) -> None:
-            preview = _normalize_transcript_text(str(args[0]))[:80] if args else ""
-            logger.debug("Flux eager_end_of_turn", call_sid=call_sid, transcript=preview)
+            transcript = _normalize_transcript_text(str(args[0])) if args else ""
+            eager_probe["eager_eot_seen"] = True
+            eager_probe["eager_eot_at"] = time.time()
+            eager_probe["eager_transcript"] = transcript
+            eager_probe["resumed_since_eager"] = False
+            logger.debug("Flux eager_end_of_turn", call_sid=call_sid, transcript=transcript[:80])
 
         @stt.event_handler("on_turn_resumed")
         async def _on_turn_resumed(service: Any, *args: Any) -> None:
+            eager_probe["turn_resumed_seen"] = True
+            eager_probe["turn_resumed_at"] = time.time()
+            eager_probe["resumed_since_eager"] = True
             logger.debug("Flux turn_resumed", call_sid=call_sid)
 
     return [

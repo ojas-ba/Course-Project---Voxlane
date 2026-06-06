@@ -30,6 +30,7 @@ def test_config_page_renders(client):
     assert "Memory" in response.text
     assert "EOT timeout (ms)" in response.text
     assert "Turn stop debounce timeout" in response.text  # LAT-2 configurable debounce
+    assert "Enable EagerEOT telemetry" in response.text     # Stage-1 eager probe config
 
 
 def test_root_renders_config(client):
@@ -156,6 +157,66 @@ def test_call_detail_renders_breakdown_merged_and_error(client):
     assert "latest&#8594;audio" in response.text or "latest→audio" in response.text       # merged earliest/latest
     assert "language_prefix_parse" in response.text       # error visible
     assert "12552 ms" in response.text                    # primary latency badge
+
+
+def test_eager_probe_summary_aggregates():
+    from app.routers.dashboard import _eager_probe_summary
+    records = [
+        {"eager_probe": {"eager_eot_seen": True, "verdict": "eligible", "turn_resumed_seen": False,
+                         "eager_final_match": True, "head_start_ms": 300.0, "estimated_saved_ms": 200.0}},
+        {"eager_probe": {"eager_eot_seen": True, "verdict": "wasted_turn_resumed", "turn_resumed_seen": True,
+                         "eager_final_match": True, "head_start_ms": 500.0, "estimated_saved_ms": 0.0}},
+        {"eager_probe": {"eager_eot_seen": False, "verdict": "no_eager_event"}},
+    ]
+    s = _eager_probe_summary(records)
+    assert s["total_turns"] == 3
+    assert s["eager_eot_turns"] == 2
+    assert s["eligible_turns"] == 1
+    assert s["turn_resumed_turns"] == 1
+    assert s["turn_resumed_rate"] == round(1 / 2, 3)         # resumed / eager
+    assert s["median_head_start_ms"] == 400.0               # median of [300, 500]
+    assert s["total_estimated_saved_ms"] == 200.0
+    # No probes on any turn (telemetry off) -> no summary.
+    assert _eager_probe_summary([{"primary_latency_ms": 800}]) is None
+
+
+def test_call_detail_renders_eager_probe(client):
+    fake_log = {
+        "_id": "x", "call_sid": "call_eager", "stream_sid": "s",
+        "config_snapshot": {"runtime_config": {}},
+        "transcript": [{"role": "assistant", "phase": "greeting", "text": "Hi!"}],
+        "metrics": {
+            "greeting_text_source": "llm",
+            "turn_records": [
+                {
+                    "turn_id": 1, "user_text": "hello", "assistant_text": "hi",
+                    "detected_language": "en", "response_language": "en",
+                    "primary_latency_ms": 820.0,
+                    "eager_probe": {
+                        "eager_eot_seen": True, "turn_resumed_seen": False,
+                        "eager_final_match": True, "head_start_ms": 320.0,
+                        "estimated_saved_ms": 240.0, "verdict": "eligible",
+                        "eager_transcript_preview": "hello", "final_transcript_preview": "hello",
+                    },
+                    "error_stage": None, "error_message": None,
+                }
+            ],
+        },
+    }
+
+    async def _find_one(query):
+        return fake_log
+
+    fake_collection = {"call_logs": type("C", (), {"find_one": staticmethod(_find_one)})()}
+    with patch("app.routers.dashboard.get_database", return_value=fake_collection):
+        response = client.get("/calls/call_eager")
+
+    assert response.status_code == 200
+    assert "EagerEOT speculative probe" in response.text    # call-level summary panel
+    assert "Spec probe" in response.text                    # per-turn probe line
+    assert "eligible" in response.text                      # verdict badge
+    assert "320 ms" in response.text                        # head start
+    assert "240 ms" in response.text                        # est. saved
 
 
 def test_call_detail_renders_overlap_ready_and_latest_commit(client):

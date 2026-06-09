@@ -72,6 +72,16 @@
         <div><label>Request timeout (s)</label><input name="llm_request_timeout_seconds" value="{{ config.llm.request_timeout_seconds }}" />
           <p class="hint">Hard timeout per LLM request (wired to the Cerebras client) and the bound on outbound greeting generation.</p></div>
       </div>
+      <div class="row">
+        <div>
+          <label>Enable speculative LLM (Stage-2)</label>
+          <select name="llm_enable_speculative_llm">
+            <option value="true" {{ 'selected' if config.llm.enable_speculative_llm }}>true</option>
+            <option value="false" {{ 'selected' if not config.llm.enable_speculative_llm }}>false</option>
+          </select>
+          <p class="hint">Starts an out-of-band Cerebras draft on EagerEndOfTurn and releases it at EndOfTurn when the eager transcript matches the final — hiding the turn-stop debounce. <strong>Requires EagerEOT telemetry on.</strong> Default <code>false</code> (off = identical to today).</p>
+        </div>
+      </div>
     </fieldset>
 
     <fieldset><legend>TTS — Cartesia</legend>

@@ -77,6 +77,14 @@ class LLMCfg(BaseModel):
     temperature: float = 0.7
     max_tokens: int = 160
     request_timeout_seconds: float = 10.0
+    # --- Stage-2 speculative LLM (OFF by default — no behavior change) ---
+    # When enabled, an out-of-band Cerebras draft is started on Deepgram Flux
+    # EagerEndOfTurn and, if the normalized eager transcript matches the final
+    # transcript at EndOfTurn, released/continued in place of the normal LLM call
+    # (hiding the turn-stop debounce + eager->final gap). It is triggered by eager
+    # events, so it REQUIRES stt.enable_eager_eot — enforced by RuntimeConfig's
+    # cross-field validator. The flag lives here because it is LLM behavior.
+    enable_speculative_llm: bool = False
 
 
 class TTSCfg(BaseModel):
@@ -123,6 +131,20 @@ class RuntimeConfig(BaseModel):
     prompt: PromptCfg = Field(default_factory=PromptCfg)
     memory: MemoryCfg = Field(default_factory=MemoryCfg)
     ops: OpsCfg = Field(default_factory=OpsCfg)
+
+    @model_validator(mode="after")
+    def _validate_speculative_requires_eager(self) -> "RuntimeConfig":
+        # Stage-2 speculation is triggered by Flux EagerEndOfTurn events, which are
+        # only emitted when stt.enable_eager_eot is on (and a threshold is set).
+        # Enabling speculation without eager would be silently inert, so surface it
+        # as a save error rather than a config that looks on but does nothing.
+        # No-op when speculation is off, so all existing stored configs validate.
+        if self.llm.enable_speculative_llm and not self.stt.enable_eager_eot:
+            raise ValueError(
+                "llm.enable_speculative_llm requires stt.enable_eager_eot "
+                "(speculation is triggered by EagerEndOfTurn events)"
+            )
+        return self
 
     @classmethod
     def default(cls, settings: Settings) -> "RuntimeConfig":

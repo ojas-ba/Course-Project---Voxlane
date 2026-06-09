@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -18,6 +19,7 @@ from app.runtime import (
     get_session,
     merge_session_metrics,
     pop_pending_outbound_context,
+    update_session_metric,
 )
 from app.services.pipecat_pipeline import run_pipeline
 from app.services.transport_factory import build_exotel_transport
@@ -44,19 +46,38 @@ async def exotel_webhook(request: Request) -> JSONResponse:
     settings = get_settings()
     call_sid = request.query_params.get("CallSid", "unknown")
 
+    direction = request.query_params.get("Direction")
     log = logger.bind(call_sid=call_sid)
     log.info(
         "Exotel webhook received",
         call_from=request.query_params.get("CallFrom"),
         call_to=request.query_params.get("CallTo"),
-        direction=request.query_params.get("Direction"),
+        direction=direction,
     )
 
     clean_ngrok = settings.public_ngrok_url.replace("https://", "").replace("http://", "").strip("/")
     wss_url = f"wss://{clean_ngrok}/telephony/exotel?sample-rate=16000"
+    # Thread the carrier Direction onto the WS URL so the media handler has an
+    # AUTHORITATIVE outbound signal even if the in-memory pending context was lost
+    # (restart / TTL / multi-worker). Absent -> handler falls back to the dict (F2).
+    if direction:
+        wss_url = f"{wss_url}&direction={quote(direction)}"
 
     log.info("Returning WebSocket URL to Exotel", wss_url=wss_url)
     return JSONResponse(content={"url": wss_url})
+
+
+def _is_outbound_direction(direction: str | None) -> bool:
+    """True only for explicitly outbound Exotel Direction values.
+
+    Strict on purpose: an unknown/inbound direction must return False so a normal
+    inbound call (which legitimately has no pending context) is never wrongly
+    failed-closed as a lost-context outbound call (F2).
+    """
+    if not direction:
+        return False
+    d = direction.lower()
+    return "outbound" in d or "outgoing" in d
 
 
 def _resolve_query_identity(websocket: WebSocket) -> tuple[str | None, str | None]:
@@ -126,6 +147,10 @@ async def exotel_websocket(websocket: WebSocket) -> None:
         settings = get_settings()
         cleanup_expired_pending_outbound_contexts(settings.pending_outbound_ttl_secs)
         pending_context = get_pending_outbound_context(call_sid)
+        # An outbound call is identified by its pending context OR — if that was lost —
+        # by the authoritative carrier Direction threaded onto the WS URL (F2).
+        direction = websocket.query_params.get("direction")
+        is_outbound = pending_context is not None or _is_outbound_direction(direction)
         config_snapshot = (
             pending_context["config_snapshot"]
             if pending_context is not None
@@ -147,12 +172,17 @@ async def exotel_websocket(websocket: WebSocket) -> None:
             return
 
         created_call_sid = call_sid
+        log = logger.bind(call_sid=call_sid, stream_sid=stream_sid)
         if pending_context is not None:
             merge_session_metrics(call_sid, pending_context.get("greeting_metrics", {}))
-        if pending_context is not None:
             pop_pending_outbound_context(call_sid)
+        elif is_outbound:
+            # Dialed outbound call whose pending context was lost (restart / TTL /
+            # multi-worker). Record it; run_pipeline will fail closed rather than speak
+            # the canned inbound greeting (F2).
+            log.warning("Outbound call connected with no pending context; will fail closed")
+            update_session_metric(call_sid, "pending_context_missing", True)
 
-        log = logger.bind(call_sid=call_sid, stream_sid=stream_sid)
         log.info("Session created, building transport")
 
         transport = build_exotel_transport(
@@ -175,7 +205,7 @@ async def exotel_websocket(websocket: WebSocket) -> None:
                 if pending_context is not None
                 else None
             ),
-            opening_mode="outbound" if pending_context is not None else "default",
+            opening_mode="outbound" if is_outbound else "default",
             greeting_start_delay_ms=(
                 0 if pending_context is not None else settings.outbound_greeting_start_delay_ms
             ),
@@ -193,11 +223,11 @@ async def exotel_websocket(websocket: WebSocket) -> None:
                 call_sid=call_sid,
                 stream_sid=stream_sid,
                 config_snapshot=session["config_snapshot"],
-                conversation_state=session.get("conversation_state"),
                 metrics=session["metrics"],
                 transcript=session["transcript"],
                 completed=result.completed,
                 error=result.error,
+                disconnected=result.disconnected,
             )
             try:
                 doc_id = await persist_call_log(call_log)
@@ -222,11 +252,11 @@ async def exotel_websocket(websocket: WebSocket) -> None:
                     call_sid=created_call_sid,
                     stream_sid=session["stream_sid"],
                     config_snapshot=session["config_snapshot"],
-                    conversation_state=session.get("conversation_state"),
                     metrics=session["metrics"],
                     transcript=session["transcript"],
                     completed=False,
                     error="WebSocket disconnected before pipeline execution",
+                    disconnected=True,
                 )
                 try:
                     doc_id = await persist_call_log(call_log)
@@ -245,7 +275,6 @@ async def exotel_websocket(websocket: WebSocket) -> None:
                     call_sid=created_call_sid,
                     stream_sid=session["stream_sid"],
                     config_snapshot=session["config_snapshot"],
-                    conversation_state=session.get("conversation_state"),
                     metrics=session["metrics"],
                     transcript=session["transcript"],
                     completed=False,

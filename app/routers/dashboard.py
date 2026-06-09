@@ -147,6 +147,7 @@ def _parse_config_form(form: Any, base: RuntimeConfig) -> RuntimeConfig:
         "temperature": f("llm_temperature", base.llm.temperature),
         "max_tokens": i("llm_max_tokens", base.llm.max_tokens),
         "request_timeout_seconds": f("llm_request_timeout_seconds", base.llm.request_timeout_seconds),
+        "enable_speculative_llm": b("llm_enable_speculative_llm", base.llm.enable_speculative_llm),
     }
     data["tts"] = {
         "provider": "cartesia",
@@ -345,15 +346,55 @@ async def post_outbound(request: Request) -> HTMLResponse:
 # --- Call logs (list/detail enhanced in Batch 3) ---------------------------
 
 
-def _latency_stats(turn_records: list[dict[str, Any]]) -> tuple[float | None, float | None]:
-    vals = [
-        r.get("primary_latency_ms")
-        for r in turn_records
-        if isinstance(r.get("primary_latency_ms"), (int, float))
-    ]
-    if not vals:
-        return None, None
-    return round(sum(vals) / len(vals), 1), max(vals)
+def _num(v: Any) -> float | None:
+    return v if isinstance(v, (int, float)) else None
+
+
+def _stat_block(xs: list[float]) -> dict[str, Any]:
+    """avg/median/p95/max + measured count for a latency series (None when empty)."""
+    if not xs:
+        return {"avg": None, "median": None, "p95": None, "max": None, "n": 0}
+    return {
+        "avg": round(sum(xs) / len(xs), 1),
+        "median": _median(xs),
+        "p95": _p95(xs),
+        "max": max(xs),
+        "n": len(xs),
+    }
+
+
+def _latency_summary(turn_records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Two distinct per-call latencies, each with avg/median/p95/max + measured count.
+
+    - ``responsiveness`` = time from the user's LAST utterance to first audio. This is
+      the felt latency: it excludes both the endpointing window (system confirming the
+      turn ended) AND any mid-thought pause on a merged turn. Uses the latest-anchored
+      turn-release value, falling back to the release/primary value for older records.
+    - ``total`` = the VAD-anchored "true silence -> first audio" (``primary_latency_ms``):
+      physically honest but includes ~600-900ms of endpointing the caller does not
+      perceive as waiting.
+
+    Null-latency turns are excluded; the measured count (``n``) is reported so the UI can
+    show ``median over n of total`` instead of hiding the gap.
+    """
+    total_vals: list[float] = []
+    resp_vals: list[float] = []
+    for r in turn_records:
+        total = _num(r.get("primary_latency_ms"))
+        if total is not None:
+            total_vals.append(total)
+        resp = _num(r.get("latest_user_stop_to_first_audio_ms"))
+        if resp is None:
+            resp = _num(r.get("user_stop_to_first_audio_release_ms"))
+        if resp is None:
+            resp = total
+        if resp is not None:
+            resp_vals.append(resp)
+    return {
+        "total_turns": len(turn_records),
+        "responsiveness": _stat_block(resp_vals),
+        "total": _stat_block(total_vals),
+    }
 
 
 def _badge_class(ms: float | None, *, warn: float, crit: float) -> str:
@@ -413,7 +454,7 @@ def _eager_probe_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None
     def _rate(num: int, den: int) -> float:
         return round(num / den, 3) if den else 0.0
 
-    return {
+    summary = {
         "total_turns": total,
         "eager_eot_turns": len(eager),
         "eligible_turns": len(eligible),
@@ -431,6 +472,105 @@ def _eager_probe_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None
         "avg_estimated_saved_ms_per_turn": round(sum(saved) / total, 1) if total else 0.0,
     }
 
+    # --- Stage-2 speculative-draft rollup (probes carry draft_* only when on) ---
+    draft_started = [p for p in probes if p.get("draft_started")]
+    if draft_started:
+        draft_released = [p for p in probes if p.get("draft_released")]
+        # A turn that resumed-then-redrafted-then-released carries BOTH draft_cancelled
+        # and draft_released; release wins so it is not double-counted (defensive — the
+        # controller also clears the stale cancel marks when the redraft starts).
+        draft_cancelled = [p for p in probes if p.get("draft_cancelled") and not p.get("draft_released")]
+        normal_used = [p for p in probes if p.get("normal_llm_used")]
+        draft_errors = [p for p in probes if p.get("draft_error")]
+        extra_calls = sum(int(p.get("extra_llm_call") or 0) for p in probes)
+        # MEASURED draft head start over RELEASED turns (not the Stage-1 estimate).
+        headstarts = [
+            p["draft_headstart_ms"] for p in draft_released
+            if isinstance(p.get("draft_headstart_ms"), (int, float))
+        ]
+        # Empirical end-to-end comparison: median user-stop->first-audio for released
+        # vs normal turns (the honest "real saving" signal across the call). Use the
+        # turn-release anchor (defined identically for EVERY turn) rather than the
+        # headline user_stop_to_first_audio_ms, which is VAD-anchored on some turns and
+        # release-anchored on others — mixing the two would make released-vs-normal an
+        # apples-to-oranges comparison (F1 review). Fall back to the headline for old
+        # records persisted before the release field existed.
+        def _release_fa(r: dict[str, Any]) -> float | None:
+            v = r.get("user_stop_to_first_audio_release_ms")
+            if not isinstance(v, (int, float)):
+                v = r.get("user_stop_to_first_audio_ms")
+            return v if isinstance(v, (int, float)) else None
+
+        released_fa = [
+            fa for r in records
+            if isinstance(r.get("eager_probe"), dict) and r["eager_probe"].get("draft_released")
+            for fa in [_release_fa(r)] if fa is not None
+        ]
+        normal_fa = [
+            fa for r in records
+            if isinstance(r.get("eager_probe"), dict) and r["eager_probe"].get("normal_llm_used")
+            for fa in [_release_fa(r)] if fa is not None
+        ]
+        med_released, med_normal = _median(released_fa), _median(normal_fa)
+        summary.update({
+            "speculation_on": True,
+            "draft_start_count": len(draft_started),
+            "draft_release_count": len(draft_released),
+            "draft_cancel_count": len(draft_cancelled),
+            "draft_error_count": len(draft_errors),
+            "normal_llm_used_count": len(normal_used),
+            "draft_use_rate": _rate(len(draft_released), len(draft_started)),
+            "cancel_rate": _rate(len(draft_cancelled), len(draft_started)),
+            "additional_llm_call_rate": _rate(extra_calls, total),
+            "median_draft_headstart_ms": _median(headstarts),
+            "p95_draft_headstart_ms": _p95(headstarts),
+            "median_user_stop_to_first_audio_released_ms": med_released,
+            "median_user_stop_to_first_audio_normal_ms": med_normal,
+            "empirical_saved_ms_population": (
+                round(med_normal - med_released, 1)
+                if med_normal is not None and med_released is not None else None
+            ),
+        })
+    return summary
+
+
+def _memory_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Call-level rollup of the per-turn memory snapshots (recall/context size).
+
+    Returns None when no turn carried a memory snapshot (feature off / no user
+    turns), so the UI only shows the card for calls that actually have data.
+    """
+    mems = [r.get("memory") for r in records if isinstance(r.get("memory"), dict)]
+    if not mems:
+        return None
+    total = len(records)
+    recall_used = [m for m in mems if m.get("recall_used")]
+    triggered = [m for m in mems if m.get("recall_triggered")]
+    ctx_counts = [
+        m["context_message_count"] for m in mems
+        if isinstance(m.get("context_message_count"), (int, float))
+    ]
+    toks = [
+        m["approx_memory_tokens"] for m in mems
+        if isinstance(m.get("approx_memory_tokens"), (int, float))
+    ]
+    total_snippets = sum(len(m.get("recall_snippets") or []) for m in mems)
+
+    def _rate(num: int, den: int) -> float:
+        return round(num / den, 3) if den else 0.0
+
+    return {
+        "total_turns": total,
+        "memory_turns": len(mems),
+        "recall_used_turns": len(recall_used),
+        "recall_triggered_turns": len(triggered),
+        "recall_use_rate": _rate(len(recall_used), len(mems)),
+        "total_recall_snippets": total_snippets,
+        "median_context_messages": _median([float(c) for c in ctx_counts]),
+        "median_approx_memory_tokens": _median([float(t) for t in toks]),
+        "max_approx_memory_tokens": max(toks) if toks else None,
+    }
+
 
 @router.get("/calls", response_class=HTMLResponse)
 async def get_calls_list(request: Request) -> HTMLResponse:
@@ -438,11 +578,15 @@ async def get_calls_list(request: Request) -> HTMLResponse:
     logs, db_connected = await _fetch_recent_logs()
     for log in logs:
         records = log.get("metrics", {}).get("turn_records", [])
-        avg, mx = _latency_stats(records)
-        log["avg_latency_ms"], log["max_latency_ms"] = avg, mx
-        log["avg_badge"] = _badge_class(avg, warn=1000, crit=2000)
-        log["max_badge"] = _badge_class(mx, warn=2000, crit=3000)
+        lat = _latency_summary(records)
+        resp, total = lat["responsiveness"], lat["total"]
+        # Responsiveness (felt latency) is the headline column; total (incl. endpointing)
+        # is shown muted alongside. Median, not avg — a few slow-LLM turns skew the mean.
+        log["resp_ms"] = resp["median"]
+        log["resp_badge"] = _badge_class(resp["median"], warn=800, crit=1500)
+        log["total_ms"] = total["median"]
         log["turn_count"] = log.get("metrics", {}).get("turn_count", len(records))
+        log["measured_latency_turns"] = resp["n"]
     return templates.TemplateResponse(
         request=request,
         name="calls.html",
@@ -465,15 +609,14 @@ async def get_call_detail(request: Request, call_sid: str) -> HTMLResponse:
     if isinstance(log.get("_id"), ObjectId):
         log["created_at"] = log["_id"].generation_time.strftime("%Y-%m-%d %H:%M:%S UTC")
     records = log.get("metrics", {}).get("turn_records", [])
-    avg_latency, max_latency = _latency_stats(records)
     return templates.TemplateResponse(
         request=request,
         name="call_detail.html",
         context={
             "log": log,
             "turn_records": records,
-            "avg_latency": avg_latency,
-            "max_latency": max_latency,
+            "latency": _latency_summary(records),
             "eager_summary": _eager_probe_summary(records),
+            "memory_summary": _memory_summary(records),
         },
     )

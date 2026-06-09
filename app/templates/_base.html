@@ -31,6 +31,10 @@
       padding:.7rem 1rem; min-width:130px; flex:1; }
     .card .lbl { font-size:.7rem; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
     .card .val { font-size:1.15rem; margin-top:.15rem; }
+    .card .big { font-size:1.6rem; font-weight:600; line-height:1.1; }
+    .card .sub { font-size:.72rem; color:var(--muted); margin-top:.3rem; }
+    .card .cap { font-size:.68rem; color:var(--muted); margin-top:.4rem; font-style:italic; }
+    .card.hero { background:linear-gradient(180deg,var(--panel2),var(--panel)); }
 
     /* panels / sections */
     .panel { background:var(--panel); border:1px solid var(--border); border-radius:10px;
@@ -71,6 +75,16 @@
     .chip.warn { background:var(--warn-bg); color:var(--warn-fg); border-color:#5a4a14; }
     .chip.crit { background:var(--crit-bg); color:var(--crit-fg); border-color:#5a1c1c; }
     .chip b { color:var(--fg); font-weight:600; }
+
+    /* grouped per-turn detail */
+    .tdetail { display:flex; flex-direction:column; gap:.35rem; padding:.15rem 0 .4rem; }
+    .gline { display:flex; align-items:baseline; flex-wrap:wrap; gap:.1rem; }
+    .glabel { flex:0 0 5.2rem; font-size:.64rem; text-transform:uppercase; letter-spacing:.05em;
+      color:var(--muted); padding-top:.15rem; }
+    .gline.alt .glabel { color:var(--accent); opacity:.8; }
+    .quote { color:var(--muted); font-size:.76rem; margin:.1rem 0 0 5.2rem; word-break:break-word; }
+    .twoline .big { font-size:1.05rem; font-weight:600; }
+    .twoline .sub { font-size:.7rem; color:var(--muted); }
 
     .status { padding:.7rem 1rem; border-radius:8px; margin:.6rem 0; }
     .status.ok { background:var(--ok-bg); color:var(--ok-fg); }

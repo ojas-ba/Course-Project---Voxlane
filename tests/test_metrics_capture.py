@@ -1,5 +1,6 @@
 import asyncio
 
+import pytest
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
@@ -9,11 +10,23 @@ from pipecat.frames.frames import (
     LLMTextFrame,
     TTSStartedFrame,
     UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.observers.base_observer import FramePushed
 from pipecat.processors.frame_processor import FrameDirection
 
 from app.services.call_metrics import TurnMetricsObserver, _ms
+
+_BREAKDOWN_REC = {
+    "turn_id": 1, "user_text": "hello", "assistant_text": "hi there",
+    "detected_language": "en", "response_language": "en",
+    "user_stopped_speaking_at": 100.0, "user_stopped_is_eot_fallback": False,
+    "stt_eot_received_at": 100.3, "turn_committed_at": 100.35,
+    "llm_response_started_at": 100.4, "llm_first_token_or_text_at": 100.7,
+    "llm_completed_at": 101.0, "tts_request_started_at": 101.05,
+    "first_audio_frame_sent_at": 101.2, "error_stage": None, "error_message": None,
+}
 
 
 def _push(obs, frame):
@@ -85,6 +98,81 @@ def test_user_stopped_falls_back_to_eot_when_no_vad_frame():
     assert out[0]["primary_latency_ms"] is not None
 
 
+def test_vad_stopped_frame_anchors_at_timestamp_minus_stop_secs():
+    # F1: the VAD true-silence instant = frame.timestamp - stop_secs, captured on
+    # VADUserStoppedSpeakingFrame and consumed by the next note_user_turn. The EOT
+    # follows the VAD silence (realistic ordering), so the anchor is accepted.
+    obs = TurnMetricsObserver(on_record=lambda r: None)
+    frame = VADUserStoppedSpeakingFrame(stop_secs=0.2)
+    frame.timestamp = 100.0
+    _push(obs, frame)
+    assert obs._pending_vad_user_stopped_at == pytest.approx(99.8)
+    obs.note_user_turn(turn_id=1, user_text="x", stt_eot_received_at=100.4, turn_committed_at=100.5)
+    assert obs._pending_turns[0]["user_stopped_speaking_vad_at"] == pytest.approx(99.8)
+    assert obs._pending_vad_user_stopped_at is None  # consumed
+
+
+def test_vad_anchor_rejected_when_after_eot():
+    # F1 guard: an anchor that post-dates the EOT can't belong to this turn.
+    obs = TurnMetricsObserver(on_record=lambda r: None)
+    frame = VADUserStoppedSpeakingFrame(stop_secs=0.0)
+    frame.timestamp = 105.0
+    _push(obs, frame)  # anchor = 105.0
+    obs.note_user_turn(turn_id=1, user_text="x", stt_eot_received_at=100.0, turn_committed_at=100.1)
+    assert obs._pending_turns[0]["user_stopped_speaking_vad_at"] is None
+
+
+def test_vad_anchor_rejected_when_implausibly_old_for_this_turn():
+    # F1 guard: a stale anchor from a prior utterance (muted barge-in leaves no fresh
+    # VADUserStartedSpeakingFrame to clear it) must not attach to a much-later turn.
+    obs = TurnMetricsObserver(on_record=lambda r: None)
+    frame = VADUserStoppedSpeakingFrame(stop_secs=0.2)
+    frame.timestamp = 100.0
+    _push(obs, frame)  # stale anchor = 99.8
+    # Next turn's EOT is 100s later -> the leftover anchor is rejected as stale.
+    obs.note_user_turn(turn_id=2, user_text="y", stt_eot_received_at=200.0, turn_committed_at=200.1)
+    assert obs._pending_turns[0]["user_stopped_speaking_vad_at"] is None
+
+
+def test_vad_started_frame_clears_stale_anchor():
+    # A fresh utterance invalidates any earlier VAD-stop anchor (no cross-turn bleed).
+    obs = TurnMetricsObserver(on_record=lambda r: None)
+    frame = VADUserStoppedSpeakingFrame(stop_secs=0.2)
+    frame.timestamp = 100.0
+    _push(obs, frame)
+    _push(obs, VADUserStartedSpeakingFrame())
+    assert obs._pending_vad_user_stopped_at is None
+
+
+def test_vad_anchor_is_headline_when_present():
+    # F1: VAD anchor (earlier than turn-release) becomes the headline primary latency.
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    rec = dict(_BREAKDOWN_REC)
+    rec["user_stopped_speaking_at"] = 100.0      # turn-release anchor
+    rec["user_stopped_speaking_vad_at"] = 99.7   # VAD true-silence (earlier)
+    obs._emit(rec)
+    r = out[0]
+    assert r["primary_latency_anchor"] == "vad"
+    assert r["user_stop_to_first_audio_vad_ms"] == round((101.2 - 99.7) * 1000, 1)      # 1500
+    assert r["user_stop_to_first_audio_release_ms"] == round((101.2 - 100.0) * 1000, 1)  # 1200
+    # The headline equals the VAD value and is LARGER (more honest) than turn-release.
+    assert r["primary_latency_ms"] == r["user_stop_to_first_audio_vad_ms"]
+    assert r["user_stop_to_first_audio_vad_ms"] > r["user_stop_to_first_audio_release_ms"]
+
+
+def test_primary_latency_falls_back_to_release_anchor_without_vad():
+    # No VAD frame -> headline uses the turn-release anchor; existing fields unchanged.
+    out: list[dict] = []
+    obs = TurnMetricsObserver(on_record=out.append)
+    obs._emit(dict(_BREAKDOWN_REC))  # no user_stopped_speaking_vad_at key
+    r = out[0]
+    assert r["primary_latency_anchor"] == "turn_release"
+    assert r["user_stop_to_first_audio_vad_ms"] is None
+    assert r["user_stop_to_first_audio_ms"] == r["user_stop_to_first_audio_release_ms"]
+    assert r["primary_latency_ms"] == round((101.2 - 100.0) * 1000, 1)
+
+
 def test_language_resolved_at_finalize_from_provider():
     out: list[dict] = []
     obs = TurnMetricsObserver(on_record=out.append, language_provider=lambda: ("hi", "hi"))
@@ -111,7 +199,7 @@ def test_emit_computes_breakdown():
         "detected_language": "en", "response_language": "en",
         "user_stopped_speaking_at": 100.0, "user_stopped_is_eot_fallback": False,
         "stt_eot_received_at": 100.3, "turn_committed_at": 100.35,
-        "llm_request_started_at": 100.4, "llm_first_token_or_text_at": 100.7,
+        "llm_response_started_at": 100.4, "llm_first_token_or_text_at": 100.7,
         "llm_completed_at": 101.0, "tts_request_started_at": 101.05,
         "first_audio_frame_sent_at": 101.2, "error_stage": None, "error_message": None,
     }
@@ -144,7 +232,7 @@ def test_delayed_llm_start_surfaces_in_committed_to_llm_start():
         "detected_language": "en", "response_language": "en",
         "user_stopped_speaking_at": 10.0, "user_stopped_is_eot_fallback": False,
         "stt_eot_received_at": 10.001, "turn_committed_at": 10.002,
-        "llm_request_started_at": 22.0, "llm_first_token_or_text_at": 22.5,
+        "llm_response_started_at": 22.0, "llm_first_token_or_text_at": 22.5,
         "llm_completed_at": 22.6, "tts_request_started_at": 22.63,
         "first_audio_frame_sent_at": 22.7, "error_stage": None, "error_message": None,
     }
@@ -195,7 +283,7 @@ def test_merged_turn_earliest_and_latest_commit_to_llm_start():
         "stt_eot_received_at": 1.0, "turn_committed_at": 1.0,
         "earliest_turn_committed_at": 1.0, "latest_turn_committed_at": 9.0,
         "merged_user_turn_ids": [3, 4],
-        "llm_request_started_at": 10.0, "llm_first_token_or_text_at": 10.4,
+        "llm_response_started_at": 10.0, "llm_first_token_or_text_at": 10.4,
         "llm_completed_at": 10.5, "tts_request_started_at": 10.55,
         "first_audio_frame_sent_at": 10.6, "error_stage": None, "error_message": None,
     }
@@ -217,7 +305,7 @@ def test_normal_turn_latest_commit_equals_committed_to_llm_start():
         "detected_language": "en", "response_language": "en",
         "user_stopped_speaking_at": 100.0, "user_stopped_is_eot_fallback": False,
         "stt_eot_received_at": 100.0, "turn_committed_at": 100.0,
-        "llm_request_started_at": 100.5, "llm_first_token_or_text_at": 100.9,
+        "llm_response_started_at": 100.5, "llm_first_token_or_text_at": 100.9,
         "llm_completed_at": 101.0, "tts_request_started_at": 101.05,
         "first_audio_frame_sent_at": 101.1, "error_stage": None, "error_message": None,
     }
@@ -239,7 +327,7 @@ def test_negative_llm_end_to_tts_is_preserved_not_clamped():
         "detected_language": "en", "response_language": "en",
         "user_stopped_speaking_at": 100.0, "user_stopped_is_eot_fallback": False,
         "stt_eot_received_at": 100.0, "turn_committed_at": 100.0,
-        "llm_request_started_at": 100.5, "llm_first_token_or_text_at": 100.9,
+        "llm_response_started_at": 100.5, "llm_first_token_or_text_at": 100.9,
         "llm_completed_at": 101.0, "tts_request_started_at": 100.99,  # TTS started before LLM end
         "first_audio_frame_sent_at": 101.1, "error_stage": None, "error_message": None,
     }
@@ -279,6 +367,32 @@ def test_memory_duration_attached_to_turn():
     assert out[0]["context_message_count"] == 7
 
 
+def test_note_provider_error_sets_stage_when_open_and_unset():
+    # F6: a TTS/STT failure mid-turn gets a stage-specific label on the open record.
+    obs = TurnMetricsObserver(on_record=lambda r: None)
+    obs.note_user_turn(turn_id=1, user_text="x", stt_eot_received_at=1.0, turn_committed_at=1.0)
+    _push(obs, LLMFullResponseStartFrame())   # opens the record
+    obs.note_provider_error(stage="tts_provider_error", message="tts_provider_error: cartesia 500")
+    assert obs._open["error_stage"] == "tts_provider_error"
+    assert "cartesia 500" in obs._open["error_message"]
+
+
+def test_note_provider_error_does_not_overwrite_existing_stage():
+    # The parser's specific llm_no_output must win over the generic provider label.
+    obs = TurnMetricsObserver(on_record=lambda r: None)
+    obs.note_user_turn(turn_id=1, user_text="x", stt_eot_received_at=1.0, turn_committed_at=1.0)
+    _push(obs, LLMFullResponseStartFrame())
+    obs.note_error(stage="llm_no_output", message="empty")
+    obs.note_provider_error(stage="llm_provider_error", message="429")
+    assert obs._open["error_stage"] == "llm_no_output"
+
+
+def test_note_provider_error_noops_without_open_record():
+    obs = TurnMetricsObserver(on_record=lambda r: None)
+    obs.note_provider_error(stage="stt_provider_error", message="deepgram down")
+    assert obs._open is None  # no crash, nothing attributed (falls through to call-end)
+
+
 def test_stt_ready_flag_persisted():
     obs = TurnMetricsObserver(on_record=lambda r: None)
     obs.note_user_turn(turn_id=1, user_text="x", stt_eot_received_at=1.0, turn_committed_at=1.0, stt_ready=False)
@@ -313,7 +427,7 @@ def _emit_with_probe(probe, **overrides):
         "detected_language": "en", "response_language": "en",
         "user_stopped_speaking_at": 100.0, "user_stopped_is_eot_fallback": False,
         "stt_eot_received_at": 100.3, "turn_committed_at": 100.35,
-        "llm_request_started_at": 100.5, "llm_first_token_or_text_at": 101.0,  # ttfb = 500ms
+        "llm_response_started_at": 100.5, "llm_first_token_or_text_at": 101.0,  # ttfb = 500ms
         "llm_completed_at": 101.1, "tts_request_started_at": 101.15,
         "first_audio_frame_sent_at": 101.2, "error_stage": None, "error_message": None,
         "eager_probe": probe,

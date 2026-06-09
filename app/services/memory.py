@@ -112,6 +112,48 @@ def recall_triggered(user_text: str) -> bool:
     return bool(_RECALL_RE.search(user_text or ""))
 
 
+def search_recall_with_sources(
+    transcript: list[dict[str, Any]],
+    *,
+    query: str,
+    max_snippets: int,
+    min_overlap: int = 2,
+    exclude_recent: int = 0,
+) -> list[dict[str, Any]]:
+    """Lexical recall over the full transcript, returning snippet + source turn.
+
+    Same scoring as :func:`search_recall_snippets` but each result is a dict
+    ``{"text": "role: ...", "source_event_index": int | None}`` so the dashboard can
+    link a recalled quote back to the turn it came from. ``source_event_index`` is the
+    transcript event's 1-based ``event_index`` (may be None for legacy events).
+    """
+    if max_snippets <= 0:
+        return []
+    q = _salient_tokens(query)
+    if not q:
+        return []
+    events = transcript[:-exclude_recent] if exclude_recent > 0 else list(transcript)
+    q_norm = " ".join((query or "").split()).lower()
+    scored: list[tuple[int, int, str, Any]] = []
+    for idx, ev in enumerate(events):
+        role = ev.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = " ".join(str(ev.get("text", "")).split())
+        if not text or text.lower() == q_norm:  # skip empties and the query turn itself
+            continue
+        overlap = len(q & _salient_tokens(text))
+        if overlap < min_overlap:
+            continue
+        score = overlap + (1 if _has_concrete_fact(text) else 0)
+        scored.append((score, idx, f"{role}: {text}", ev.get("event_index")))
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)  # score desc, then recency
+    return [
+        {"text": snippet, "source_event_index": src}
+        for _score, _idx, snippet, src in scored[:max_snippets]
+    ]
+
+
 def search_recall_snippets(
     transcript: list[dict[str, Any]],
     *,
@@ -131,28 +173,16 @@ def search_recall_snippets(
     back (always search, conditionally inject). Assistant lines are returned AS
     quotes (claims the bot made), never asserted as truth.
     """
-    if max_snippets <= 0:
-        return []
-    q = _salient_tokens(query)
-    if not q:
-        return []
-    events = transcript[:-exclude_recent] if exclude_recent > 0 else list(transcript)
-    q_norm = " ".join((query or "").split()).lower()
-    scored: list[tuple[int, int, str]] = []
-    for idx, ev in enumerate(events):
-        role = ev.get("role")
-        if role not in ("user", "assistant"):
-            continue
-        text = " ".join(str(ev.get("text", "")).split())
-        if not text or text.lower() == q_norm:  # skip empties and the query turn itself
-            continue
-        overlap = len(q & _salient_tokens(text))
-        if overlap < min_overlap:
-            continue
-        score = overlap + (1 if _has_concrete_fact(text) else 0)
-        scored.append((score, idx, f"{role}: {text}"))
-    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)  # score desc, then recency
-    return [snippet for _score, _idx, snippet in scored[:max_snippets]]
+    return [
+        r["text"]
+        for r in search_recall_with_sources(
+            transcript,
+            query=query,
+            max_snippets=max_snippets,
+            min_overlap=min_overlap,
+            exclude_recent=exclude_recent,
+        )
+    ]
 
 
 def should_update_summary(turn_count: int, memory_cfg: dict[str, Any]) -> bool:

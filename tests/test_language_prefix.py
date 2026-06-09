@@ -244,6 +244,22 @@ def test_safe_repeat_only_when_nothing_usable():
     assert _spoken(captured) == "Sorry, could you repeat that?"
 
 
+def test_empty_reply_reports_llm_no_output_not_prefix_parse():
+    # A genuinely EMPTY LLM reply (zero tokens — e.g. a Cerebras 429 / empty
+    # completion: the failing turns showed "LLM TTFB —") must be reported as
+    # llm_no_output, NOT language_prefix_parse (which would mislabel a rate-limit
+    # as a tag bug). The bot still speaks the safe fallback line.
+    m = _FakeMetrics()
+    proc, captured = _make(metrics=m)
+    asyncio.run(_run(proc, [
+        LLMFullResponseStartFrame(),
+        LLMFullResponseEndFrame(),  # no text frame at all -> empty reply
+    ]))
+    assert _spoken(captured) == "Sorry, could you repeat that?"
+    assert m.errors and m.errors[0][0] == "llm_no_output"
+    assert "no output" in m.errors[0][1].lower()
+
+
 def test_no_control_tag_reaches_tts_or_metrics_on_prefixless_plus_mid_tag():
     m = _FakeMetrics()
     proc, captured = _make(metrics=m)

@@ -81,6 +81,11 @@ from app.services import memory as mem
 from app.services.call_metrics import TurnMetricsObserver
 from app.services.deferred_flux_stt import DeferredConnectDeepgramFluxSTTService
 from app.services.language_prefix import LanguagePrefixProcessor
+from app.services.speculation_controller import (
+    SpecGateProcessor,
+    SpeculationController,
+    make_cerebras_draft_factory,
+)
 from app.services.turn_collector import TurnCollector, utc_now
 
 MULTILINGUAL_FLUX_MODEL = "flux-general-multi"
@@ -299,6 +304,11 @@ class SttLanguageHintProcessor(FrameProcessor):
             set_session_language_state(self._call_sid, state)
 
 
+# Per-snippet/per-fact length cap before persisting memory marks, so a verbose
+# turn can't bloat the Mongo turn record or the dashboard (D7).
+_MEMORY_SNIPPET_CAP = 200
+
+
 class MemoryProcessor(FrameProcessor):
     """Govern the LLM context for bounded in-call memory.
 
@@ -325,6 +335,16 @@ class MemoryProcessor(FrameProcessor):
         self._base_system = base_system_prompt
         self._cfg = memory_cfg
         self._metrics = metrics_observer
+        # Per-turn memory snapshot (what the agent recalled/used this turn). Replaced
+        # wholesale on each finalized user turn in _govern_context; the observer pins
+        # it at the LLM-response start (snapshot-at-promote), so on a MERGED turn the
+        # LAST sub-utterance's memory — the one that shaped the reply — is the one
+        # recorded. Mirrors the SpeculationController._marks / drain_marks pattern.
+        self._memory_marks: dict[str, Any] = {}
+
+    def drain_memory_marks(self) -> dict[str, Any]:
+        """Return the current per-turn memory snapshot (for the metrics observer)."""
+        return dict(self._memory_marks)
 
     async def process_frame(
         self, frame: Any, direction: FrameDirection = FrameDirection.DOWNSTREAM
@@ -361,15 +381,17 @@ class MemoryProcessor(FrameProcessor):
         # relaxes the threshold so an explicit ask reliably surfaces something.
         recent_pairs = int(self._cfg.get("recent_turn_pairs", 6))
         min_overlap = int(self._cfg.get("recall_min_overlap", 2))
-        if mem.recall_triggered(user_text):
+        triggered = mem.recall_triggered(user_text)
+        if triggered:
             min_overlap = 1
-        recall = mem.search_recall_snippets(
+        recall_results = mem.search_recall_with_sources(
             get_session_transcript(self._call_sid),
             query=user_text,
             max_snippets=int(self._cfg.get("max_recall_snippets", 2)),
             min_overlap=min_overlap,
             exclude_recent=recent_pairs * 2,
         )
+        recall = [r["text"] for r in recall_results]
 
         system_block = mem.build_system_block(
             self._base_system,
@@ -386,6 +408,28 @@ class MemoryProcessor(FrameProcessor):
             recent_turn_pairs=int(self._cfg.get("recent_turn_pairs", 6)),
         )
         self._context.set_messages([{"role": "system", "content": system_block}] + trimmed)
+
+        # Per-turn memory snapshot for the dashboard. "recall_used" means relevant
+        # earlier context WAS injected into the system block — an opportunity signal,
+        # not proof the LLM leaned on it. approx_memory_tokens is char/4 (the module's
+        # own budget unit), not a real tokenizer count.
+        self._memory_marks = {
+            "recall_used": bool(recall),
+            "recall_triggered": bool(triggered),
+            "recall_min_overlap": min_overlap,
+            "recall_snippets": [s[:_MEMORY_SNIPPET_CAP] for s in recall],
+            "recall_source_turns": [
+                r["source_event_index"]
+                for r in recall_results
+                if r.get("source_event_index") is not None
+            ],
+            "pinned_facts": [f[:_MEMORY_SNIPPET_CAP] for f in memory["pinned_facts"]],
+            "pinned_facts_count": len(memory["pinned_facts"]),
+            "running_summary_present": bool(memory.get("running_summary")),
+            "context_message_count": len(self._context.messages),
+            "memory_block_char_len": len(system_block),
+            "approx_memory_tokens": len(system_block) // 4,
+        }
 
 
 def _record_greeting(*, call_sid: str, greeting_text: str) -> None:
@@ -467,6 +511,29 @@ def _build_pipeline_processors(
         memory_cfg=(snapshot.get("runtime_config") or {}).get("memory") or {},
         metrics_observer=metrics_observer,
     )
+    # Per-turn memory snapshot -> turn record (snapshot-at-promote in the observer,
+    # so a merged turn records the last sub-utterance's memory).
+    metrics_observer.set_memory_marks_provider(memory_processor.drain_memory_marks)
+
+    # F6: attribute provider failures to the open turn with a stage-specific label
+    # (instead of the generic incomplete_at_call_end / no_bot_response). Each service
+    # fires on_error with its own ErrorFrame, so the stage is implicit per service —
+    # cleaner than parsing processor identity off an upstream ErrorFrame. note_provider_error
+    # does NOT overwrite a more specific stage (e.g. the parser's llm_no_output), so the LLM
+    # path keeps its precise label while TTS/STT failures stop reading as incomplete_at_call_end.
+    def _register_provider_error(service: Any, stage: str) -> None:
+        if not hasattr(service, "event_handler"):
+            return
+
+        @service.event_handler("on_error")
+        async def _on_provider_error(_service: Any, error: Any) -> None:
+            msg = getattr(error, "error", None) or str(error)
+            metrics_observer.note_provider_error(stage=stage, message=f"{stage}: {msg}"[:300])
+
+    _register_provider_error(stt, "stt_provider_error")
+    _register_provider_error(tts, "tts_provider_error")
+    _register_provider_error(llm, "llm_provider_error")
+
     language_prefix = LanguagePrefixProcessor(
         call_sid=call_sid, metrics_observer=metrics_observer
     )
@@ -480,6 +547,26 @@ def _build_pipeline_processors(
     eager_enabled = bool(_stt_cfg(snapshot).get("enable_eager_eot"))
     eager_probe: dict[str, Any] = {}
 
+    # Stage-2 speculative LLM (OFF by default). Requires eager events to trigger the
+    # draft, so it is additionally gated on eager_enabled (belt-and-suspenders with the
+    # RuntimeConfig cross-field validator). When disabled, NO gate/controller exists and
+    # the processor list below is the byte-identical baseline.
+    spec_enabled = bool(_llm_cfg(snapshot).get("enable_speculative_llm")) and eager_enabled
+    spec_controller: SpeculationController | None = None
+    spec_gate: SpecGateProcessor | None = None
+    if spec_enabled:
+        spec_controller = SpeculationController(
+            call_sid=call_sid,
+            context=context,
+            base_system_prompt=snapshot["SYSTEM_PROMPT"],
+            memory_cfg=(snapshot.get("runtime_config") or {}).get("memory") or {},
+            draft_stream_factory=make_cerebras_draft_factory(llm),
+        )
+        spec_gate = SpecGateProcessor(controller=spec_controller)
+        # Stage-2 metrics ride the existing eager_probe via the controller's marks,
+        # pulled at finalize so a draft_released set after EOT is captured.
+        metrics_observer.set_speculation_marks_provider(spec_controller.drain_marks)
+
     if hasattr(stt, "event_handler"):
         @stt.event_handler("on_end_of_turn")
         async def _on_end_of_turn(service: Any, transcript: str) -> None:
@@ -489,6 +576,11 @@ def _build_pipeline_processors(
             # if a StartOfTurn is missed.
             probe_snapshot = dict(eager_probe) if eager_enabled else None
             eager_probe.clear()
+            # Stage-2: commit the per-turn release/normal decision on the FINAL
+            # transcript BEFORE the debounced LLMContextFrame reaches the gate. Done
+            # before any early-return so an armed/draft state is always resolved.
+            if spec_controller is not None:
+                await spec_controller.on_end_of_turn(transcript)
             result = turn_collector.observe(
                 TurnEvent(event_type="end_of_turn", text=transcript, timestamp=utc_now()),
                 phase="task",
@@ -533,6 +625,8 @@ def _build_pipeline_processors(
         @stt.event_handler("on_start_of_turn")
         async def _on_start_of_turn(service: Any, *args: Any) -> None:
             eager_probe.clear()  # new turn boundary
+            if spec_controller is not None:
+                await spec_controller.on_turn_start()
             logger.debug("Flux start_of_turn", call_sid=call_sid)
 
         @stt.event_handler("on_eager_end_of_turn")
@@ -542,6 +636,9 @@ def _build_pipeline_processors(
             eager_probe["eager_eot_at"] = time.time()
             eager_probe["eager_transcript"] = transcript
             eager_probe["resumed_since_eager"] = False
+            if spec_controller is not None:
+                # Start the out-of-band draft on the eager transcript (Stage-2).
+                await spec_controller.on_eager(transcript)
             logger.debug("Flux eager_end_of_turn", call_sid=call_sid, transcript=transcript[:80])
 
         @stt.event_handler("on_turn_resumed")
@@ -549,6 +646,9 @@ def _build_pipeline_processors(
             eager_probe["turn_resumed_seen"] = True
             eager_probe["turn_resumed_at"] = time.time()
             eager_probe["resumed_since_eager"] = True
+            if spec_controller is not None:
+                # MAIN invalidation: discard the unreleased draft.
+                await spec_controller.on_resumed()
             logger.debug("Flux turn_resumed", call_sid=call_sid)
 
     return [
@@ -557,6 +657,10 @@ def _build_pipeline_processors(
         stt_language_hint,
         memory_processor,
         aggregator_pair.user(),
+        # Stage-2 response gate (only present when speculation is enabled). Sits between
+        # the user aggregator and the LLM so it can swallow the turn's LLMContextFrame on
+        # a draft hit; absent -> the list is the byte-identical baseline.
+        *([spec_gate] if spec_gate is not None else []),
         llm,
         language_prefix,
         tts,
@@ -568,9 +672,15 @@ def _build_pipeline_processors(
 class PipelineExecutionResult:
     """Serializable pipeline outcome returned to the route."""
 
-    def __init__(self, *, completed: bool, error: str | None = None) -> None:
+    def __init__(
+        self, *, completed: bool, error: str | None = None, disconnected: bool = False
+    ) -> None:
         self.completed = completed
         self.error = error
+        # Structured hang-up signal so the call-outcome derivation never has to
+        # substring-match "disconnect" in arbitrary exception text (which would
+        # misread a real crash as a user hang-up).
+        self.disconnected = disconnected
 
 
 async def run_pipeline(
@@ -652,7 +762,24 @@ async def run_pipeline(
     # The greeting is spoken from on_client_connected (see _schedule_opening_greeting)
     # so the carrier media path is up before we send audio, then a short settle
     # delay. It fires autonomously — it never waits for the caller to speak.
-    greeting_source = prepared_greeting_text if opening_mode == "outbound" else None
+    is_outbound = opening_mode == "outbound"
+    if is_outbound and not (prepared_greeting_text or "").strip():
+        # F2/D5 fail-closed: an outbound call must NEVER speak the canned inbound
+        # greeting. A missing LLM greeting means the pending context was lost (process
+        # restart, TTL expiry, multi-worker, or greeting-generation failure). Record it
+        # and end the call rather than faking an inbound open with canned text.
+        log.warning("Outbound greeting missing; failing closed (no canned outbound greeting)")
+        update_session_metric(call_sid, "greeting_text_source", "missing_outbound_context")
+        update_session_metric(call_sid, "pending_context_missing", True)
+        return PipelineExecutionResult(
+            completed=False, error="outbound greeting missing (pending context lost)"
+        )
+
+    greeting_source = prepared_greeting_text if is_outbound else None
+    if greeting_source is None:
+        # Inbound/default path: the canned greeting IS legitimate here, but mark the
+        # static path so the dashboard can see it was used (the "clearly mark" half of F2).
+        update_session_metric(call_sid, "greeting_text_source", "static_inbound_default")
     # Defensive: the greeting is spoken via TTSSpeakFrame and never passes through
     # LanguagePrefixProcessor, so strip any leaked <en>/<hi> tag before it is
     # spoken or stored (the outbound path also strips in validate_greeting_text) —
@@ -687,7 +814,7 @@ async def run_pipeline(
         return PipelineExecutionResult(completed=True)
     except asyncio.CancelledError:
         log.info("Pipeline runner cancelled (user disconnected)")
-        return PipelineExecutionResult(completed=True, error="User disconnected")
+        return PipelineExecutionResult(completed=True, error="User disconnected", disconnected=True)
     except Exception as exc:
         log.error("Pipeline runner failed: {error}", error=str(exc))
         return PipelineExecutionResult(completed=False, error=str(exc))

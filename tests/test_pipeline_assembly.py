@@ -10,7 +10,7 @@ from pipecat.services.cerebras.llm import CerebrasLLMService
 from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 
 from app.config import get_settings
-from app.models.runtime_config_models import STTCfg
+from app.models.runtime_config_models import LLMCfg, RuntimeConfig, STTCfg
 from app.runtime import build_config_snapshot
 from app.services.call_metrics import TurnMetricsObserver
 from app.services.deferred_flux_stt import DeferredConnectDeepgramFluxSTTService
@@ -245,3 +245,111 @@ def test_user_muted_until_first_bot_complete_during_greeting():
     types = {type(s) for s in _user_mute_strategies()}
     assert MuteUntilFirstBotCompleteUserMuteStrategy in types
     assert AlwaysUserMuteStrategy in types
+
+
+# --- Stage-2 speculative LLM: config surface + disabled-path proof (Slice 1) ---
+
+
+def test_enable_speculative_llm_defaults_false():
+    # Stage-2 OFF by default: the flag lives in LLMCfg and defaults False so the
+    # normal path is unchanged until explicitly enabled.
+    assert LLMCfg().enable_speculative_llm is False
+
+
+def test_speculative_llm_requires_eager_eot_cross_field():
+    # Speculation is triggered by Flux EagerEndOfTurn events; enabling it without
+    # stt.enable_eager_eot would be silently inert, so the top-level RuntimeConfig
+    # validator rejects that combination loudly (the /config save fails).
+    with pytest.raises(ValidationError):
+        RuntimeConfig(
+            llm=LLMCfg(enable_speculative_llm=True),
+            stt=STTCfg(enable_eager_eot=False),
+        )
+    # Speculation on + eager on (valid eager config) -> accepted.
+    RuntimeConfig(
+        llm=LLMCfg(enable_speculative_llm=True),
+        stt=STTCfg(enable_eager_eot=True, eager_eot_threshold=0.6, eot_threshold=0.7),
+    )
+    # Speculation off -> validator is a no-op even with eager off (existing configs).
+    RuntimeConfig(
+        llm=LLMCfg(enable_speculative_llm=False),
+        stt=STTCfg(enable_eager_eot=False),
+    )
+
+
+def test_pipeline_byte_identical_when_speculation_disabled():
+    # With the flag off, NO speculative processor is inserted: the processor list
+    # is the exact 10-element baseline with the LLM at index 5 and prefix at 6.
+    settings = get_settings()
+    snap = copy.deepcopy(build_config_snapshot(settings))
+    snap["runtime_config"]["llm"]["enable_speculative_llm"] = False
+    transport = MagicMock()
+    obs = TurnMetricsObserver(on_record=lambda r: None)
+    from app.services.pipecat_pipeline import _build_pipeline_processors
+
+    procs = _build_pipeline_processors(
+        transport=transport,
+        snapshot=snap,
+        settings=settings,
+        call_sid="c1",
+        stream_sid="s1",
+        metrics_observer=obs,
+    )
+    assert len(procs) == 10
+    assert isinstance(procs[5], CerebrasLLMService)        # llm still at baseline index
+    assert isinstance(procs[6], LanguagePrefixProcessor)   # prefix immediately after llm
+
+
+def test_pipeline_inserts_gate_between_user_agg_and_llm_when_enabled():
+    # With speculation enabled (and eager on, so the config is internally valid), the
+    # SpecGateProcessor is inserted at index 5, shifting llm->6, prefix->7, tts->8.
+    from app.services.speculation_controller import SpecGateProcessor
+
+    settings = get_settings()
+    snap = copy.deepcopy(build_config_snapshot(settings))
+    snap["runtime_config"]["llm"]["enable_speculative_llm"] = True
+    snap["runtime_config"]["stt"]["enable_eager_eot"] = True
+    snap["runtime_config"]["stt"]["eager_eot_threshold"] = 0.6
+    transport = MagicMock()
+    obs = TurnMetricsObserver(on_record=lambda r: None)
+    from app.services.pipecat_pipeline import _build_pipeline_processors
+
+    procs = _build_pipeline_processors(
+        transport=transport,
+        snapshot=snap,
+        settings=settings,
+        call_sid="c1",
+        stream_sid="s1",
+        metrics_observer=obs,
+    )
+    assert len(procs) == 11
+    assert isinstance(procs[4], type(procs[4]))                # user aggregator
+    assert isinstance(procs[5], SpecGateProcessor)             # gate between user-agg and llm
+    assert isinstance(procs[6], CerebrasLLMService)            # llm shifted to 6
+    assert isinstance(procs[7], LanguagePrefixProcessor)      # prefix shifted to 7
+    assert isinstance(procs[8], CartesiaTTSService)            # tts shifted to 8
+    assert procs[9] is transport.output.return_value
+    assert procs[4] is not procs[10]                           # distinct user/assistant aggregators
+    # the gate is wired to a real controller
+    from app.services.speculation_controller import SpeculationController
+    assert isinstance(procs[5]._controller, SpeculationController)
+
+
+def test_speculation_not_enabled_without_eager_even_if_llm_flag_set():
+    # Defensive belt-and-suspenders: enable_speculative_llm alone (eager off) must NOT
+    # insert the gate (the cross-field validator would normally reject this combo, but a
+    # raw snapshot can carry it; the pipeline guard makes speculation truly inert).
+    settings = get_settings()
+    snap = copy.deepcopy(build_config_snapshot(settings))
+    snap["runtime_config"]["llm"]["enable_speculative_llm"] = True
+    snap["runtime_config"]["stt"]["enable_eager_eot"] = False
+    transport = MagicMock()
+    obs = TurnMetricsObserver(on_record=lambda r: None)
+    from app.services.pipecat_pipeline import _build_pipeline_processors
+
+    procs = _build_pipeline_processors(
+        transport=transport, snapshot=snap, settings=settings,
+        call_sid="c1", stream_sid="s1", metrics_observer=obs,
+    )
+    assert len(procs) == 10                                    # no gate inserted
+    assert isinstance(procs[5], CerebrasLLMService)

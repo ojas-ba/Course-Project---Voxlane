@@ -5,8 +5,21 @@ from fastapi.testclient import TestClient
 from main import app
 from app.config import get_settings
 from app.models.runtime_config_models import RuntimeConfig
+from app.routers.telephony import _is_outbound_direction
 from app.runtime import PENDING_OUTBOUND_CALLS
 from app.services.exotel_client import ExotelCallResult
+
+
+def test_is_outbound_direction_strict():
+    # F2: only explicitly-outbound values are outbound; everything else (incl. None
+    # and inbound) is False so an inbound call is never wrongly failed-closed.
+    assert _is_outbound_direction("outbound-dial") is True
+    assert _is_outbound_direction("outbound") is True
+    assert _is_outbound_direction("Outgoing") is True
+    assert _is_outbound_direction("inbound") is False
+    assert _is_outbound_direction("incoming") is False
+    assert _is_outbound_direction(None) is False
+    assert _is_outbound_direction("") is False
 
 
 @pytest.fixture

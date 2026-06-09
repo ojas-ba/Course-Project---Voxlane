@@ -153,10 +153,10 @@ def test_call_detail_renders_breakdown_merged_and_error(client):
 
     assert response.status_code == 200
     assert "merged 3, 4" in response.text                 # merged ids visible
-    assert "User&#8594;LLM start" in response.text or "User→LLM start" in response.text  # breakdown chip
+    assert "Pipeline" in response.text                    # grouped breakdown line label
     assert "latest&#8594;audio" in response.text or "latest→audio" in response.text       # merged earliest/latest
     assert "language_prefix_parse" in response.text       # error visible
-    assert "12552 ms" in response.text                    # primary latency badge
+    assert "12552 ms" in response.text                    # total latency shown (VAD anchor)
 
 
 def test_eager_probe_summary_aggregates():
@@ -178,6 +178,69 @@ def test_eager_probe_summary_aggregates():
     assert s["total_estimated_saved_ms"] == 200.0
     # No probes on any turn (telemetry off) -> no summary.
     assert _eager_probe_summary([{"primary_latency_ms": 800}]) is None
+
+
+def test_memory_summary_aggregates():
+    from app.routers.dashboard import _memory_summary
+
+    records = [
+        {"memory": {"recall_used": True, "recall_triggered": True, "recall_snippets": ["user: a", "user: b"],
+                    "context_message_count": 8, "approx_memory_tokens": 200}},
+        {"memory": {"recall_used": False, "recall_triggered": False, "recall_snippets": [],
+                    "context_message_count": 6, "approx_memory_tokens": 150}},
+        {"primary_latency_ms": 700},  # turn without a memory snapshot
+    ]
+    s = _memory_summary(records)
+    assert s["total_turns"] == 3
+    assert s["memory_turns"] == 2
+    assert s["recall_used_turns"] == 1
+    assert s["recall_triggered_turns"] == 1
+    assert s["recall_use_rate"] == 0.5                      # 1 of 2 memory turns
+    assert s["total_recall_snippets"] == 2
+    assert s["median_context_messages"] == 7.0             # median(8, 6)
+    assert s["max_approx_memory_tokens"] == 200
+    # No memory on any turn -> no summary card.
+    assert _memory_summary([{"primary_latency_ms": 800}]) is None
+
+
+def test_call_detail_renders_memory_block(client):
+    fake_log = {
+        "_id": "x", "call_sid": "call_mem", "stream_sid": "s",
+        "config_snapshot": {"runtime_config": {}},
+        "transcript": [{"role": "assistant", "phase": "greeting", "text": "Hi!"}],
+        "metrics": {
+            "greeting_text_source": "llm",
+            "turn_records": [
+                {
+                    "turn_id": 2, "user_text": "what did i say about Acme", "assistant_text": "You said Acme.",
+                    "detected_language": "en", "response_language": "en",
+                    "primary_latency_ms": 900.0,
+                    "memory": {
+                        "recall_used": True, "recall_triggered": True, "recall_min_overlap": 1,
+                        "recall_snippets": ["user: I work at Acme Corporation"],
+                        "recall_source_turns": [1], "pinned_facts_count": 1,
+                        "running_summary_present": False, "context_message_count": 9,
+                        "approx_memory_tokens": 180,
+                    },
+                    "error_stage": None, "error_message": None,
+                }
+            ],
+        },
+    }
+
+    async def _find_one(query):
+        return fake_log
+
+    fake_collection = {"call_logs": type("C", (), {"find_one": staticmethod(_find_one)})()}
+    with patch("app.routers.dashboard.get_database", return_value=fake_collection):
+        response = client.get("/calls/call_mem")
+
+    assert response.status_code == 200
+    assert "recall yes" in response.text                     # per-turn recall badge
+    assert "I work at Acme Corporation" in response.text     # recalled snippet shown verbatim
+    assert "from turns 1" in response.text                   # source-turn linkage (D6)
+    assert "explicit ask" in response.text                   # recall_triggered chip
+    assert "Turns with memory" in response.text              # call-level rollup card
 
 
 def test_call_detail_renders_eager_probe(client):
@@ -213,7 +276,7 @@ def test_call_detail_renders_eager_probe(client):
 
     assert response.status_code == 200
     assert "EagerEOT speculative probe" in response.text    # call-level summary panel
-    assert "Spec probe" in response.text                    # per-turn probe line
+    assert "head start" in response.text                    # per-turn spec line label
     assert "eligible" in response.text                      # verdict badge
     assert "320 ms" in response.text                        # head start
     assert "240 ms" in response.text                        # est. saved
@@ -241,7 +304,7 @@ def test_call_detail_renders_overlap_ready_and_latest_commit(client):
                     "llm_ttfb_ms": 400.0, "llm_total_ms": 430.0,
                     "llm_end_to_tts_start_ms": -9.0,  # streaming overlap
                     "tts_first_audio_ms": 120.0,
-                    "stt_ready_before_user_turn": True,
+                    "stt_ready_before_user_turn": False,
                     "error_stage": None, "error_message": None,
                 }
             ],
@@ -257,6 +320,34 @@ def test_call_detail_renders_overlap_ready_and_latest_commit(client):
 
     assert response.status_code == 200
     assert "overlap 9" in response.text                       # MET-1: negative shown as overlap
-    assert "STT ready: yes" in response.text                  # OBS-1: tri-state ready
+    assert "STT not ready before turn" in response.text       # OBS-1: surfaced only when not ready
     assert "latest Commit" in response.text                   # LAT-1: latest-anchored commit chip
     assert "480" in response.text                             # latest Commit->LLM value rendered
+
+
+def test_latency_summary_responsiveness_and_total():
+    from app.routers.dashboard import _latency_summary
+
+    records = [
+        # responsiveness = last-utterance->audio (latest anchor); total = VAD primary.
+        {"primary_latency_ms": 1200, "latest_user_stop_to_first_audio_ms": 500},
+        {"primary_latency_ms": 1400, "latest_user_stop_to_first_audio_ms": 600},
+        {"primary_latency_ms": 900},        # no latest -> responsiveness falls back to primary
+        {"primary_latency_ms": None},       # unmeasured (no first-audio)
+        {},                                 # no key at all
+    ]
+    s = _latency_summary(records)
+    assert s["total_turns"] == 5
+    # Total (VAD) measured on 3 turns.
+    assert s["total"]["n"] == 3
+    assert s["total"]["median"] == 1200          # median(900, 1200, 1400)
+    assert s["total"]["max"] == 1400
+    # Responsiveness measured on the same 3 turns, but far lower (excludes endpointing).
+    assert s["responsiveness"]["n"] == 3
+    assert s["responsiveness"]["median"] == 600  # median(500, 600, 900-fallback)
+    assert s["responsiveness"]["max"] == 900
+
+    # All-null -> empty stat blocks (em-dash fallback in the UI).
+    empty = _latency_summary([{"primary_latency_ms": None}, {}])
+    assert empty["responsiveness"]["n"] == 0
+    assert empty["total"]["median"] is None

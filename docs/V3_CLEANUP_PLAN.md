@@ -180,14 +180,14 @@ User Stop → First Audio Sent | EOT delay | LLM TTFB | LLM total | TTS first au
 
 **Primary:** `primary_latency_ms = first_audio_frame_sent_at − user_stopped_speaking_at`, labelled **"User Stop → First Audio Sent"** (never "audible/heard/playback" — the server cannot know phone-speaker timing).
 
-**Per-turn timestamps:** `turn_id`, `user_stopped_speaking_at`, `stt_eot_received_at`, `turn_committed_at`, `llm_request_started_at`, `llm_first_token_or_text_at`, `llm_completed_at`, `tts_request_started_at`, `first_audio_frame_sent_at`.
+**Per-turn timestamps:** `turn_id`, `user_stopped_speaking_at`, `stt_eot_received_at`, `turn_committed_at`, `llm_response_started_at`, `llm_first_token_or_text_at`, `llm_completed_at`, `tts_request_started_at`, `first_audio_frame_sent_at`.
 
 **Breakdown:** `eot_delay_ms`, `commit_delay_ms`, `llm_ttfb_ms`, `llm_total_ms`, `tts_first_audio_ms`.
 
 **Capture points:**
 - `user_stopped_speaking_at` → reuse `UserBotLatencyObserver` (`VADUserStoppedSpeakingFrame.timestamp − stop_secs`, [user_bot_latency_observer.py:245-250](../.venv/Lib/site-packages/pipecat/observers/user_bot_latency_observer.py#L245-L250)).
 - `stt_eot_received_at` / `turn_committed_at` → Flux `on_end_of_turn` handler + `TurnCollector.observe` commit ([turn_collector.py:129-151](../app/services/turn_collector.py#L129-L151)).
-- `llm_request_started_at` / `llm_first_token_or_text_at` / `llm_completed_at` → around the live LLM service (first `TextFrame` = TTFB; `LLMFullResponseEndFrame` = completed).
+- `llm_response_started_at` / `llm_first_token_or_text_at` / `llm_completed_at` → around the live LLM service (first `TextFrame` = TTFB; `LLMFullResponseEndFrame` = completed).
 - `first_audio_frame_sent_at` → `BotStartedSpeakingFrame` is the accepted server-side proxy ([user_bot_latency_observer.py:278-296](../.venv/Lib/site-packages/pipecat/observers/user_bot_latency_observer.py#L278-L296)).
 
 Per-turn debug fields only: `turn_id`, transcript, detected language, response language, LLM response text, latency breakdown, error stage/message. No frame-by-frame logging.

@@ -17,9 +17,13 @@ This processor sits between the LLM and Cartesia TTS. It:
   5. Feeds the metrics observer the spoken text + chosen language (so metrics
      never show the raw tag).
 
-If the tag is missing/malformed it falls back (last response language → STT
-hint → English), records ``error_stage="language_prefix_parse"``, and still
-speaks the text — it never stalls the turn or calls the LLM again.
+If the tag is missing/malformed but the model DID produce words, it falls back
+(last response language → STT hint → English), records
+``error_stage="language_prefix_parse"``, and still speaks the recovered text — it
+never stalls the turn or calls the LLM again. If the model produced NO usable text
+at all (an empty reply — e.g. a Cerebras 429 / empty completion), that is reported
+under ``error_stage="llm_no_output"`` instead, so a provider failure is not
+mislabeled as a prefix-parsing bug.
 
 Package assumptions (verified against the installed Pipecat 1.2.1):
   * ``CerebrasLLMService`` subclasses ``OpenAILLMService``, whose streaming text
@@ -60,6 +64,11 @@ from app.services.language import (
 )
 
 _PREFIX_ERROR_STAGE = "language_prefix_parse"
+# A genuinely EMPTY LLM reply (zero usable text) is NOT a tag-parse failure — it
+# means the model produced nothing (e.g. a Cerebras 429 / empty completion). It is
+# reported under its own stage so the dashboard stops mislabeling rate-limit/empty
+# turns as a prefix problem.
+_NO_OUTPUT_ERROR_STAGE = "llm_no_output"
 # Spoken only when a malformed/empty reply leaves nothing safe to say.
 _SAFE_REPEAT_LINE = "Sorry, could you repeat that?"
 
@@ -160,10 +169,21 @@ class LanguagePrefixProcessor(FrameProcessor):
             # the finalize signal, and a later note_error would no-op on an
             # already-emitted record (P1-1).
             if self._prefix_error:
-                self._metrics.note_error(
-                    stage=self._prefix_error,
-                    message="LLM reply missing/malformed <en>/<hi> tag; used fallback language.",
-                )
+                # Distinguish a genuinely EMPTY reply (LLM emitted ZERO text — e.g. a
+                # Cerebras 429 / empty completion, the "LLM TTFB —" turns) from a real
+                # tag-parse failure (the model DID produce words, just no valid
+                # <en>/<hi>). _prefix_error is set for both because an empty buffer also
+                # "has no tag", so disambiguate on whether the model produced any raw
+                # text at all. Empty = an LLM/upstream failure, not a prefix bug; a
+                # partial tag like "<en" counts as text produced (-> prefix parse).
+                empty_reply = not self._raw_llm_text.strip()
+                if empty_reply:
+                    stage = _NO_OUTPUT_ERROR_STAGE
+                    message = "LLM produced no output (empty reply — e.g. provider rate limit/timeout); spoke a safe fallback line."
+                else:
+                    stage = _PREFIX_ERROR_STAGE
+                    message = "LLM reply missing/malformed <en>/<hi> tag; used fallback language."
+                self._metrics.note_error(stage=stage, message=message)
             # Defensive: never persist a control tag even if streaming missed one.
             self._metrics.note_assistant_text(sanitize_language_control_tags(spoken))
 

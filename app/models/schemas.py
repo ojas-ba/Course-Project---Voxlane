@@ -14,52 +14,6 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-class LatencyEvent(BaseModel):
-    """Single normalized latency event from a UserBotLatencyObserver breakdown.
-
-    This is the required persistence shape per TECHNICAL_PLAN.md:
-    {"time": float, "event": str}
-    """
-
-    time: float
-    event: str
-
-
-class TTFBEntry(BaseModel):
-    """Single TTFB entry captured from the observer breakdown."""
-
-    processor: str
-    start_time: float
-    duration_secs: float
-
-
-class LatencySummary(BaseModel):
-    """Normalized latency summary for a single user-to-bot turn."""
-
-    total_latency_secs: float | None = None
-    user_turn_secs: float | None = None
-    stt_ttfb_secs: float | None = None
-    llm_ttfb_secs: float | None = None
-    tts_ttfb_secs: float | None = None
-    text_aggregation_secs: float | None = None
-    function_call_secs_total: float | None = None
-    residual_secs: float | None = None
-    unmapped_ttfb_entries: list[TTFBEntry] = Field(default_factory=list)
-
-
-class TurnMetrics(BaseModel):
-    """Metrics captured for a single user-to-bot turn.
-
-    Each on_latency_breakdown observer callback produces one TurnMetrics
-    containing the total user-to-bot latency and the normalized per-service
-    timeline events.
-    """
-
-    user_bot_latency_secs: float | None = None
-    latency_events: list[LatencyEvent] = Field(default_factory=list)
-    latency_summary: LatencySummary | None = None
-
-
 class TranscriptEvent(BaseModel):
     """Single chronological transcript event.
 
@@ -89,7 +43,6 @@ class CallMetrics(BaseModel):
     greeting_text_ready_before_dial: bool | None = None
     greeting_text_source: str | None = None
     turn_count: int = 0
-    turns: list[TurnMetrics] = Field(default_factory=list)
     # V3 per-turn records: "User Stop -> First Audio Sent" + stage timestamps.
     turn_records: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -105,18 +58,12 @@ class CallLog(BaseModel):
     call_sid: str
     stream_sid: str
     config_snapshot: dict  # ConfigSnapshot as plain dict for MongoDB
-    conversation_state: dict[str, Any] | None = None
     metrics: CallMetrics = Field(default_factory=CallMetrics)
     transcript: list[TranscriptEvent] = Field(default_factory=list)
     completed: bool = True
     error: str | None = None
+    # Transport-level result (did the media session complete) vs. the derived
+    # open-ended conversation outcome. See metrics_logger._derive_conversation_outcome:
+    # completed | no_user_turns | greeting_failed | user_disconnected | pipeline_error.
     call_transport_status: str = "completed"
-    conversation_outcome: str = "incomplete"
-    final_conversation_phase: str | None = None
-    # TODO(phase2-metrics): vestigial slot-flow fields. V3 never sets a slot-based
-    # conversation_state, so these stay at 0/[] and are harmless. Remove together
-    # with _conversation_summary's slot logic when the call-outcome model is
-    # redesigned (also drop RuntimeSession.conversation_state). Left now to avoid
-    # churning the still-passing finalize tests during the review pass.
-    slots_collected_count: int = 0
-    required_slots_missing: list[str] = Field(default_factory=list)
+    conversation_outcome: str = "completed"

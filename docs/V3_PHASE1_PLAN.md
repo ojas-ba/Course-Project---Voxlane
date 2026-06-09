@@ -193,7 +193,7 @@ Pydantic `RuntimeConfig` mirrors this (sub-models `STTCfg/LLMCfg/TTSCfg/PromptCf
 ```jsonc
 { "turn_id":1,"user_text":"...","assistant_text":"...","detected_language":"hi","response_language":"hi",
   "user_stopped_speaking_at":..., "stt_eot_received_at":..., "turn_committed_at":...,
-  "llm_request_started_at":..., "llm_first_token_or_text_at":..., "llm_completed_at":...,
+  "llm_response_started_at":..., "llm_first_token_or_text_at":..., "llm_completed_at":...,
   "tts_request_started_at":..., "first_audio_frame_sent_at":...,
   "primary_latency_ms":..., "eot_delay_ms":..., "commit_delay_ms":..., "llm_ttfb_ms":..., "llm_total_ms":..., "tts_first_audio_ms":...,
   "error_stage":null, "error_message":null }

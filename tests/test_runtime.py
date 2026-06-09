@@ -11,7 +11,6 @@ from app.runtime import (
     get_pending_outbound_context,
     get_session,
     pop_pending_outbound_context,
-    update_session_conversation_state,
 )
 
 
@@ -70,36 +69,3 @@ def test_cleanup_expired_pending_outbound_contexts():
 
     assert cleanup_expired_pending_outbound_contexts(1.0) == 1
     assert get_pending_outbound_context("call_123") is None
-
-
-def test_update_session_conversation_state_stores_json_safe_deep_copy():
-    settings = get_settings()
-    create_session("call_123", "stream_456", settings)
-    snapshot = {
-        "call_sid": "call_123",
-        "phase": "readiness",
-        "slots": {"name": {"slot_id": "name", "status": "missing"}},
-    }
-
-    try:
-        update_session_conversation_state("call_123", snapshot)
-        snapshot["slots"]["name"]["status"] = "collected"
-
-        session = get_session("call_123")
-        assert session is not None
-        assert session["conversation_state"] == {
-            "call_sid": "call_123",
-            "phase": "readiness",
-            "slots": {"name": {"slot_id": "name", "status": "missing"}},
-        }
-    finally:
-        delete_session("call_123")
-
-
-def test_update_session_conversation_state_noops_for_missing_session():
-    update_session_conversation_state(
-        "missing_call",
-        {"call_sid": "missing_call", "phase": "readiness"},
-    )
-
-    assert get_session("missing_call") is None

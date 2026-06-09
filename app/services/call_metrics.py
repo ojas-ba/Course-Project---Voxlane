@@ -24,6 +24,14 @@ from a real backend stall.
 
 Primary metric (server-side proxy, NOT phone-speaker playback):
     user_stop_to_first_audio_ms = first_audio_frame_sent_at - user_stopped_speaking_at
+
+The user-stop anchor prefers the VAD-determined silence instant
+(``VADUserStoppedSpeakingFrame.timestamp - stop_secs``) when present, which is the
+honest user-perceived start of the wait. The plain ``UserStoppedSpeakingFrame`` is
+the *turn-release* event — later than true silence by the VAD stop window plus the
+turn-stop debounce — so its anchored value is retained only as a secondary
+``user_stop_to_first_audio_release_ms`` diagnostic. When no VAD frame is seen (e.g.
+unit tests) the headline falls back to the turn-release anchor.
 """
 
 from __future__ import annotations
@@ -41,9 +49,18 @@ from pipecat.frames.frames import (
     LLMTextFrame,
     TTSStartedFrame,
     UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.processors.frame_processor import FrameDirection
+
+
+# F1: a VAD-stop anchor older than this (relative to the turn's EOT) cannot
+# plausibly belong to the current utterance, so it is rejected as stale. Guards the
+# muted-barge-in path, where an EOT fires with no fresh VADUserStartedSpeakingFrame
+# to clear a leftover anchor from a prior utterance.
+_MAX_VAD_ANCHOR_AGE_SECS = 30.0
 
 
 def _ms(later: float | None, earlier: float | None) -> float | None:
@@ -65,13 +82,27 @@ class TurnMetricsObserver(BaseObserver):
         *,
         on_record: Callable[[dict[str, Any]], None],
         language_provider: Callable[[], tuple[str | None, str | None]] | None = None,
+        speculation_marks_provider: Callable[[], dict[str, Any]] | None = None,
+        memory_marks_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         super().__init__()
         self._on_record = on_record
         self._language_provider = language_provider
+        # Stage-2: returns the SpeculationController's current per-turn marks at
+        # finalize time (so a draft_released set after EOT is captured). None when
+        # speculation is disabled -> no draft_* fields, record shape unchanged.
+        self._speculation_marks_provider = speculation_marks_provider
+        # Memory feature: returns the MemoryProcessor's per-turn snapshot (recall/
+        # pinned/summary). Pinned at promote time like the speculation marks. None ->
+        # no "memory" key, record shape unchanged.
+        self._memory_marks_provider = memory_marks_provider
         self._pending_turns: list[dict[str, Any]] = []
         self._open: dict[str, Any] | None = None
         self._pending_user_stopped_at: float | None = None
+        # F1: the VAD-determined true-silence instant (timestamp - stop_secs) for the
+        # current utterance. Reset on VADUserStartedSpeakingFrame so a stale anchor from
+        # a prior utterance can't bleed into the next turn.
+        self._pending_vad_user_stopped_at: float | None = None
         self._pending_bot_was_speaking: bool | None = None
         self._bot_speaking: bool = False
         # Monotonic per-response id (one per LLMFullResponseStartFrame) so late
@@ -80,6 +111,14 @@ class TurnMetricsObserver(BaseObserver):
         # Memory governance timing for the turn currently being assembled.
         self._pending_memory_duration_ms: float | None = None
         self._pending_context_message_count: int | None = None
+
+    def set_speculation_marks_provider(self, provider: Callable[[], dict[str, Any]] | None) -> None:
+        """Wire the Stage-2 marks source (the SpeculationController) post-construction."""
+        self._speculation_marks_provider = provider
+
+    def set_memory_marks_provider(self, provider: Callable[[], dict[str, Any]] | None) -> None:
+        """Wire the per-turn memory snapshot source (the MemoryProcessor)."""
+        self._memory_marks_provider = provider
 
     # -- side-channel annotations (called from the pipeline) ----------------
 
@@ -97,15 +136,28 @@ class TurnMetricsObserver(BaseObserver):
         user_stopped = self._pending_user_stopped_at
         user_stopped_is_fallback = user_stopped is None
         if user_stopped_is_fallback:
-            # No VAD UserStoppedSpeakingFrame seen; fall back to the EOT time so
-            # primary latency is never silently null.
+            # No UserStoppedSpeakingFrame seen; fall back to the EOT time so primary
+            # latency is never silently null.
             user_stopped = stt_eot_received_at
+        # F1: the VAD-anchored true-silence instant for this sub-utterance (may be
+        # None if no VADUserStoppedSpeakingFrame was observed). Reject a stale anchor
+        # that cannot belong to THIS turn — it must precede the EOT and be recent. A
+        # muted barge-in fires an EOT (Flux is upstream of the user mute) but NO
+        # VADUserStartedSpeakingFrame to clear a leftover anchor, so without this guard
+        # a prior utterance's anchor could attach here and skew the headline latency.
+        vad_user_stopped = self._pending_vad_user_stopped_at
+        if vad_user_stopped is not None and (
+            vad_user_stopped > stt_eot_received_at
+            or (stt_eot_received_at - vad_user_stopped) > _MAX_VAD_ANCHOR_AGE_SECS
+        ):
+            vad_user_stopped = None
         bot_was_speaking = (
             self._pending_bot_was_speaking
             if self._pending_bot_was_speaking is not None
             else self._bot_speaking
         )
         self._pending_user_stopped_at = None
+        self._pending_vad_user_stopped_at = None
         self._pending_bot_was_speaking = None
         pending = {
             "turn_id": turn_id,
@@ -114,10 +166,11 @@ class TurnMetricsObserver(BaseObserver):
             "detected_language": None,
             "response_language": None,
             "user_stopped_speaking_at": user_stopped,
+            "user_stopped_speaking_vad_at": vad_user_stopped,
             "user_stopped_is_eot_fallback": user_stopped_is_fallback,
             "stt_eot_received_at": stt_eot_received_at,
             "turn_committed_at": turn_committed_at,
-            "llm_request_started_at": None,
+            "llm_response_started_at": None,
             "llm_first_token_or_text_at": None,
             "llm_completed_at": None,
             "tts_request_started_at": None,
@@ -148,6 +201,16 @@ class TurnMetricsObserver(BaseObserver):
                 "final_eot_at": stt_eot_received_at,
                 "final_transcript": user_text,
             }
+        # Snapshot the memory marks for THIS turn now. A turn that never gets a bot
+        # response (flushed as no_bot_response at call end) is never promoted, so without
+        # its own snapshot _emit would fall back to the LIVE provider — which by then holds
+        # a LATER turn's marks, mislabeling this turn's memory (review LOW). A promoted turn
+        # overwrites this with the fresher LLM-start snapshot in _promote_pending.
+        if self._memory_marks_provider is not None:
+            try:
+                pending["_memory_marks_snapshot"] = dict(self._memory_marks_provider() or {})
+            except Exception:
+                pending["_memory_marks_snapshot"] = {}
         self._pending_turns.append(pending)
 
     def note_language(self, *, detected_language: str | None, response_language: str | None) -> None:
@@ -164,6 +227,25 @@ class TurnMetricsObserver(BaseObserver):
 
     def note_error(self, *, stage: str, message: str) -> None:
         if self._open is not None:
+            self._open["error_stage"] = stage
+            self._open["error_message"] = message
+
+    def note_provider_error(self, *, stage: str, message: str) -> None:
+        """Attribute a provider (LLM/TTS/STT) ErrorFrame to the open turn (F6).
+
+        Unlike note_error, this does NOT overwrite an already-set stage, so a more
+        specific label set elsewhere (e.g. the prefix parser's ``llm_no_output``) wins.
+        No-ops when no record is open — the turn then falls through to the call-end
+        catch-all (``incomplete_at_call_end`` / ``no_bot_response``) as before.
+
+        Known limitation (telemetry-only): TTS/STT errors are pushed from a background
+        websocket receive task, so under a narrow superseded-turn interleaving a lagging
+        error could land on the NEXT turn's open record. The ErrorFrame carries no
+        turn/response key to correlate against, and this stamp-the-open-record shape is
+        inherent to the observer model (note_error has it too); it never affects call
+        behaviour, only which turn carries the provider-error label.
+        """
+        if self._open is not None and self._open.get("error_stage") is None:
             self._open["error_stage"] = stage
             self._open["error_message"] = message
 
@@ -197,6 +279,21 @@ class TurnMetricsObserver(BaseObserver):
             self._bot_speaking = False
             if self._open is not None and self._open.get("bot_stopped_speaking_at") is None:
                 self._open["bot_stopped_speaking_at"] = now
+            return
+        if isinstance(frame, VADUserStartedSpeakingFrame):
+            # A new utterance is in progress: any earlier VAD-stop anchor is stale.
+            self._pending_vad_user_stopped_at = None
+            return
+        if isinstance(frame, VADUserStoppedSpeakingFrame):
+            # F1: true user-silence instant = when the VAD made its determination
+            # minus the silence window it waited (stop_secs). frame.timestamp is
+            # wall-clock (default_factory=time.time), directly comparable to time.time().
+            stop_secs = getattr(frame, "stop_secs", 0.0) or 0.0
+            ts = getattr(frame, "timestamp", None)
+            if isinstance(ts, (int, float)) and ts > 0:
+                self._pending_vad_user_stopped_at = ts - stop_secs
+            else:
+                self._pending_vad_user_stopped_at = now - stop_secs
             return
         if isinstance(frame, UserStoppedSpeakingFrame):
             self._pending_user_stopped_at = now
@@ -251,7 +348,17 @@ class TurnMetricsObserver(BaseObserver):
         merged = dict(turns[0])
         stops = [t["user_stopped_speaking_at"] for t in turns if t["user_stopped_speaking_at"] is not None]
         commits = [t["turn_committed_at"] for t in turns if t.get("turn_committed_at") is not None]
+        vad_stops = [
+            t["user_stopped_speaking_vad_at"]
+            for t in turns
+            if t.get("user_stopped_speaking_vad_at") is not None
+        ]
         merged["latest_user_stopped_speaking_at"] = max(stops) if stops else merged["user_stopped_speaking_at"]
+        # F1: earliest VAD-silence anchor across sub-turns (mirrors the earliest
+        # turn-release anchor used as the primary user_stopped_speaking_at).
+        merged["user_stopped_speaking_vad_at"] = (
+            min(vad_stops) if vad_stops else merged.get("user_stopped_speaking_vad_at")
+        )
         # Earliest/latest commit anchors. For a single turn these equal
         # turn_committed_at; for a merged turn the *latest* is the commit of the
         # sub-utterance that actually triggered the LLM, so latest-anchored
@@ -275,7 +382,11 @@ class TurnMetricsObserver(BaseObserver):
             # the LLM, so its eager probe is the relevant head-start measurement.
             if turns[-1].get("eager_probe") is not None:
                 merged["eager_probe"] = turns[-1]["eager_probe"]
-        merged["llm_request_started_at"] = now
+        # F5: stamped at the downstream LLMFullResponseStartFrame — the RESPONSE
+        # start, which Pipecat pushes BEFORE start_ttfb_metrics() and the actual
+        # provider request. It is a frame-level proxy, not the exact API request
+        # start, so it is named *_response_started_at (not *_request_started_at).
+        merged["llm_response_started_at"] = now
         merged["response_id"] = self._response_seq
         merged["_llm_ended"] = False
         if merged.get("memory_processor_duration_ms") is None:
@@ -283,6 +394,25 @@ class TurnMetricsObserver(BaseObserver):
             merged["context_message_count"] = self._pending_context_message_count
         self._pending_memory_duration_ms = None
         self._pending_context_message_count = None
+        # Stage-2: pin this record to the controller's marks AT THIS TURN's response
+        # start. Reading the live provider later (at finalize) is racy — a next-turn
+        # on_turn_start resets _marks, and the superseded-record path finalizes turn N
+        # while the live marks already belong to turn N+1. All load-bearing draft fields
+        # (draft_started/first_token/hit/cancelled, and draft_released set in take_release)
+        # are populated BEFORE the Start frame, so promote-time snapshotting loses nothing.
+        if self._speculation_marks_provider is not None:
+            try:
+                merged["_spec_marks_snapshot"] = dict(self._speculation_marks_provider() or {})
+            except Exception:
+                merged["_spec_marks_snapshot"] = {}
+        # Memory feature: pin the MemoryProcessor's snapshot for THIS turn at response
+        # start (same rationale as the speculation snapshot — the live provider already
+        # belongs to turn N+1 by the time a superseded turn N finalizes).
+        if self._memory_marks_provider is not None:
+            try:
+                merged["_memory_marks_snapshot"] = dict(self._memory_marks_provider() or {})
+            except Exception:
+                merged["_memory_marks_snapshot"] = {}
         self._open = merged
 
     def _try_finalize(self) -> None:
@@ -290,7 +420,7 @@ class TurnMetricsObserver(BaseObserver):
         if rec is None:
             return
         audio_seen = rec["first_audio_frame_sent_at"] is not None
-        llm_started = rec["llm_request_started_at"] is not None
+        llm_started = rec["llm_response_started_at"] is not None
         # The parser's note_assistant_text is the authoritative "response done"
         # signal — NOT the raw LLMFullResponseEndFrame. Finalizing on the frame
         # would race ahead of note_error/note_assistant_text and drop both the
@@ -335,20 +465,34 @@ class TurnMetricsObserver(BaseObserver):
         # Stage breakdown — each delta localizes time to ONE segment.
         rec["user_stop_to_eot_ms"] = _ms(rec["stt_eot_received_at"], earliest_stop)
         rec["eot_to_turn_committed_ms"] = _ms(rec["turn_committed_at"], rec["stt_eot_received_at"])
-        rec["user_stop_to_llm_start_ms"] = _ms(rec["llm_request_started_at"], earliest_stop)
-        rec["turn_committed_to_llm_start_ms"] = _ms(rec["llm_request_started_at"], rec["turn_committed_at"])
+        rec["user_stop_to_llm_start_ms"] = _ms(rec["llm_response_started_at"], earliest_stop)
+        rec["turn_committed_to_llm_start_ms"] = _ms(rec["llm_response_started_at"], rec["turn_committed_at"])
         # Earliest vs latest commit -> LLM start. For merged turns the earliest is
         # inflated by the inter-utterance pause; the latest is the true backend
         # delay. For normal turns both equal turn_committed_to_llm_start_ms (LAT-1).
-        rec["earliest_turn_committed_to_llm_start_ms"] = _ms(rec["llm_request_started_at"], earliest_commit)
-        rec["latest_turn_committed_to_llm_start_ms"] = _ms(rec["llm_request_started_at"], latest_commit)
-        rec["llm_ttfb_ms"] = _ms(rec["llm_first_token_or_text_at"], rec["llm_request_started_at"])
-        rec["llm_total_ms"] = _ms(rec["llm_completed_at"], rec["llm_request_started_at"])
+        rec["earliest_turn_committed_to_llm_start_ms"] = _ms(rec["llm_response_started_at"], earliest_commit)
+        rec["latest_turn_committed_to_llm_start_ms"] = _ms(rec["llm_response_started_at"], latest_commit)
+        rec["llm_ttfb_ms"] = _ms(rec["llm_first_token_or_text_at"], rec["llm_response_started_at"])
+        rec["llm_total_ms"] = _ms(rec["llm_completed_at"], rec["llm_response_started_at"])
         rec["llm_end_to_tts_start_ms"] = _ms(rec["tts_request_started_at"], rec["llm_completed_at"])
         rec["tts_first_audio_ms"] = _ms(first_audio, rec["tts_request_started_at"])
-        rec["user_stop_to_first_audio_ms"] = _ms(first_audio, earliest_stop)
+        # Turn-release anchor (UserStoppedSpeakingFrame) — later than true silence by
+        # the VAD stop window + turn-stop debounce; kept as a secondary diagnostic.
         rec["earliest_user_stop_to_first_audio_ms"] = _ms(first_audio, earliest_stop)
         rec["latest_user_stop_to_first_audio_ms"] = _ms(first_audio, latest_stop)
+        rec["user_stop_to_first_audio_release_ms"] = rec["earliest_user_stop_to_first_audio_ms"]
+        # F1: VAD anchor (true user-silence = VAD timestamp - stop_secs) — the honest
+        # user-perceived latency. None when no VAD stop was observed.
+        vad_stop = rec.get("user_stopped_speaking_vad_at")
+        rec["user_stop_to_first_audio_vad_ms"] = _ms(first_audio, vad_stop)
+        # Headline primary latency PREFERS the VAD anchor (D3); falls back to the
+        # turn-release anchor when no VAD frame was seen (e.g. unit tests).
+        if rec["user_stop_to_first_audio_vad_ms"] is not None:
+            rec["user_stop_to_first_audio_ms"] = rec["user_stop_to_first_audio_vad_ms"]
+            rec["primary_latency_anchor"] = "vad"
+        else:
+            rec["user_stop_to_first_audio_ms"] = rec["user_stop_to_first_audio_release_ms"]
+            rec["primary_latency_anchor"] = "turn_release"
 
         # Back-compat aliases (existing UI/tests).
         rec["primary_latency_ms"] = rec["user_stop_to_first_audio_ms"]
@@ -358,6 +502,18 @@ class TurnMetricsObserver(BaseObserver):
         # Stage-1 EagerEOT telemetry (only present when enabled).
         if isinstance(rec.get("eager_probe"), dict):
             self._finalize_eager_probe(rec)
+        # Defensive: drop the internal Stage-2 marks snapshot if _finalize_eager_probe
+        # didn't consume it (e.g. a record without an eager_probe), so it never persists.
+        rec.pop("_spec_marks_snapshot", None)
+
+        # Memory feature: attach the per-turn memory snapshot (recall/pinned/summary),
+        # pinned at promote time. Prefer the snapshot; fall back to the live provider for
+        # callers that drive _emit directly (unit tests). Internal key always dropped.
+        mem_snap = rec.pop("_memory_marks_snapshot", None)
+        if self._memory_marks_provider is not None:
+            marks = mem_snap if mem_snap is not None else (self._memory_marks_provider() or {})
+            if marks:
+                rec["memory"] = marks
 
         try:
             self._on_record(rec)
@@ -423,6 +579,37 @@ class TurnMetricsObserver(BaseObserver):
         probe["eager_final_match"] = match
         probe["estimated_saved_ms"] = saved
         probe["verdict"] = verdict
+
+        # --- Stage-2 speculative-draft outcome (only when speculation is on) ---
+        # Merge the controller's per-turn marks (captured at finalize so a
+        # draft_released set after EOT is included). No provider -> no draft_* keys,
+        # so the record shape is unchanged when speculation is disabled.
+        if self._speculation_marks_provider is not None:
+            # Prefer the per-record snapshot taken at promote time (correct turn); fall
+            # back to the live provider for callers that drive _emit directly (unit tests).
+            snap = rec.pop("_spec_marks_snapshot", None)
+            marks = snap if snap is not None else (self._speculation_marks_provider() or {})
+            for k, v in marks.items():
+                if k.startswith("draft_") or k == "turn_resumed_after_draft":
+                    probe[k] = v
+            draft_started = bool(probe.get("draft_started"))
+            draft_released = bool(probe.get("draft_released"))
+            probe["draft_used"] = draft_released
+            # The LLM ran normally unless the draft was released in its place.
+            probe["normal_llm_used"] = not draft_released
+            # A started-but-not-released draft is a wasted extra Cerebras call; a
+            # released draft replaces the normal call (no extra). No draft -> 0.
+            probe["extra_llm_call"] = 1 if (draft_started and not draft_released) else 0
+            # MEASURED draft head start (NOT end-to-end saved latency — Correction 1):
+            # how far ahead of the final EOT the draft already had its first token.
+            # llm_ttfb_ms reads ~0 on released turns (tokens were pre-buffered), so use
+            # this for speculative analysis instead of provider TTFB.
+            dft = probe.get("draft_first_token_at")
+            if draft_released and isinstance(dft, (int, float)) and final_at is not None:
+                probe["draft_headstart_ms"] = round(max(0.0, (final_at - dft) * 1000.0), 1)
+            else:
+                probe["draft_headstart_ms"] = None
+
         # Drop full transcripts (the turn's user_text already holds the final one);
         # keep short previews to avoid bloating persisted records.
         probe["eager_transcript_preview"] = (probe.pop("eager_transcript", "") or "")[:80]

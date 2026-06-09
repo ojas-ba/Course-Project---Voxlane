@@ -1,7 +1,11 @@
-# Voicebot V3 — Local Run & Live Exotel Validation Runbook
+# Runbook — Local Run & Live Exotel Validation
 
 > No secrets in this file. Fill real keys only in your local `.env` (gitignored).
-> This validates Phase 1 end-to-end. Until these steps pass, Phase 1 is NOT complete.
+> This is the end-to-end validation checklist for a real call. Unit tests prove logic only — a live
+> Exotel call is the only proof of voice behavior, latency, and audio quality.
+>
+> For *how the system works*, see the [docs index](README.md) — especially
+> [ARCHITECTURE](ARCHITECTURE.md), [LATENCY](LATENCY.md), and [CONFIGURATION](CONFIGURATION.md).
 
 ## 1. Prerequisites
 - Python venv at `.venv` with deps installed (`pip install -e .`).
@@ -67,8 +71,10 @@ ngrok http 8000
 - To compare: set the flag false in `/config`, Save, place a (warm) call, note first-audio; set it true, Save, place another warm call; compare. The first call after a server restart still pays a one-time cold start — compare **warm** calls only.
 
 ## 9. Inspect results
-- `GET /calls` → your call with avg/max "User Stop → First Audio Sent".
-- `GET /calls/{call_sid}` → greeting text, full transcript, per-turn table (merged/superseded turns are labelled).
+- `GET /calls` → your call with **Responsiveness** (median last-word→audio, the felt latency) and **Total**
+  (median incl. endpointing). See [METRICS](METRICS.md) and [LATENCY](LATENCY.md) for what these mean.
+- `GET /calls/{call_sid}` → greeting text, full transcript, the per-turn table with grouped Pipeline /
+  Spec / Memory breakdowns (merged/superseded turns are labelled), plus call-level EagerEOT and memory cards.
 - **Metrics that must be non-null** for a normal turn: `user_text`, `assistant_text`, `detected_language`, `response_language`, `primary_latency_ms`, `llm_total_ms`. `assistant_text` must be the **spoken** text only — never an `<en>`/`<hi>` tag. (`user_stopped_is_eot_fallback=true` is acceptable — it means the EOT timestamp was used.)
 
 ## 10. Failure-path test

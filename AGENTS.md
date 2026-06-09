@@ -1,8 +1,8 @@
 # AGENTS.md - Voice Agent Global Rules
 
-Active documentation lives under [docs/README.md](docs/README.md). The V3 plan of record is
-[docs/V3_CLEANUP_PLAN.md](docs/V3_CLEANUP_PLAN.md) (decisions, scope, phases) with supporting
-research in [docs/V3_REDESIGN_RESEARCH.md](docs/V3_REDESIGN_RESEARCH.md).
+Active documentation lives under [docs/](docs/) — see [docs/README.md](docs/README.md) for the index.
+Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/LATENCY.md](docs/LATENCY.md), and
+[docs/METRICS.md](docs/METRICS.md). Accepted decisions are in [docs/decisions/](docs/decisions/).
 
 ## Mission
 
@@ -16,9 +16,9 @@ call is the only proof.
 
 ## Operating Model
 
-V3 is built in phases (see `docs/V3_CLEANUP_PLAN.md` §11 and the phase plan). Implement only the
-current phase's scope; do not pre-build future-phase code. If a blocker materially affects later
-phases, document it and stop for review.
+Implement in small, reviewable, test-backed slices. Don't pre-build speculative future work. If a blocker
+materially affects the design, document it and stop for review. Never claim voice behavior "works" from
+unit tests — a real Exotel live call is the only proof.
 
 ## Boundaries
 

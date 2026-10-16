@@ -21,7 +21,8 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.aggregators.llm_context import LLMContext
 
 from app.config import get_settings
-from app.services.conversation_controller import _build_cerebras_llm
+from app.services.pipecat_pipeline import _build_llm as _build_cerebras_llm
+from app.services.runtime_config import load_runtime_config, build_effective_snapshot
 
 class MockSourceNode(FrameProcessor):
     """Pushes test frames immediately after pipeline startup."""
@@ -76,11 +77,7 @@ class MetricsCollector(FrameProcessor):
 async def test_live_llm_metrics():
     """Test Cerebras LLM API and measure generation metrics in isolation."""
     settings = get_settings()
-    snapshot = {
-        "SYSTEM_PROMPT": "You are a helpful assistant.",
-        "LLM_MODEL": settings.llm_model,
-        "LLM_TEMPERATURE": settings.llm_temperature,
-    }
+    snapshot = build_effective_snapshot(await load_runtime_config(settings))
     
     llm = _build_cerebras_llm(snapshot, settings)
     

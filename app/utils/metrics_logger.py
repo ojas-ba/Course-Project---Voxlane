@@ -97,11 +97,11 @@ def finalize_call_log(
     """Build a persistence-safe CallLog from runtime session state.
 
     Converts the runtime session's accumulated metrics dict into a
-    typed CallLog ready for database insertion.
+    typed CallLog ready for local JSON serialization.
 
     Args:
-        call_sid: Exotel call identifier.
-        stream_sid: Exotel stream identifier.
+        call_sid: Local conversation identifier.
+        stream_sid: Local audio-stream identifier.
         config_snapshot: The immutable per-call config snapshot.
         metrics: The accumulated metrics dict from the runtime session.
         transcript: The completed transcript turns from the runtime session.

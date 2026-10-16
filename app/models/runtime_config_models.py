@@ -1,39 +1,33 @@
-"""Typed models for the single global V3 runtime configuration.
-
-There is exactly one runtime config document (``_id="global"``) in MongoDB.
-Only secrets/infra live in ``.env``; all tuning/behavior lives here and is
-editable from the frontend. These models are mutable (editable) by design,
-unlike the frozen V2 profile models.
-"""
+"""Typed behavior configuration persisted locally and snapshotted per conversation."""
 
 from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.config import Settings
 
-GLOBAL_CONFIG_ID = "global"
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are a helpful, friendly assistant on a live phone call. Keep replies "
-    "natural, concise, and genuinely useful. Because this is a phone call, keep "
-    "answers short — usually 1-2 sentences — and ask one question at a time. "
-    "Give a longer answer only when the caller explicitly asks for detail."
+    "You are a helpful, friendly assistant in a live browser conversation. "
+    "Keep replies natural, concise, and useful, usually one or two sentences. "
+    "Ask one question at a time. Give more detail when the user asks for it."
 )
-DEFAULT_GREETING_PROMPT = (
-    "Generate a short, warm English opening greeting for a phone call. The "
-    "assistant should introduce itself briefly and invite the user to speak. "
-    "Keep it under one sentence."
-)
+DEFAULT_GREETING_TEXT = "Hello, how can I help you today?"
 
 
-class STTCfg(BaseModel):
-    model: str = "flux-general-multi"
+class RuntimeModel(BaseModel):
+    """Reject misspelled configuration fields rather than silently ignoring them."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+class STTCfg(RuntimeModel):
+    """Flux audio and turn boundary settings."""
+    model: Literal["flux-general-multi", "flux-general-en"] = "flux-general-multi"
     language_hints: list[str] = Field(default_factory=lambda: ["en", "hi"])
-    eot_threshold: float = 0.65
-    eot_timeout_ms: int = 700
+    eot_threshold: float = Field(default=0.65, ge=0.5, le=1.0)
+    eot_timeout_ms: int = Field(default=700, ge=500, le=60000)
     # Connect the Flux websocket in the background on start so the opening
     # greeting isn't blocked ~1s waiting for STT (see deferred_flux_stt.py).
     defer_connect_on_start: bool = True
@@ -53,6 +47,15 @@ class STTCfg(BaseModel):
     enable_eager_eot: bool = False
     eager_eot_threshold: float | None = Field(default=None, ge=0.3, le=0.9)
 
+    @field_validator("language_hints")
+    @classmethod
+    def supported_hints(cls, hints: list[str]) -> list[str]:
+        """Validate the language codes supported by Flux Multilingual."""
+        supported = {"en", "es", "fr", "de", "hi", "ru", "pt", "ja", "it", "nl"}
+        if any(h not in supported for h in hints):
+            raise ValueError("Unsupported Flux language hint")
+        return list(dict.fromkeys(hints))
+
     @model_validator(mode="after")
     def _validate_eager_threshold(self) -> "STTCfg":
         # Only constrains when eager is actually enabled, so it is a no-op for the
@@ -71,12 +74,14 @@ class STTCfg(BaseModel):
         return self
 
 
-class LLMCfg(BaseModel):
+class LLMCfg(RuntimeModel):
+    """Cerebras model and bounded generation settings."""
     provider: Literal["cerebras"] = "cerebras"
-    model: str = "gpt-oss-120b"
-    temperature: float = 0.7
-    max_tokens: int = 160
-    request_timeout_seconds: float = 10.0
+    model: Literal["qwen-3.8-27b", "gpt-oss-120b"] = "qwen-3.8-27b"
+    reasoning_effort: Literal["none", "low", "medium", "high"] = "none"
+    temperature: float = Field(default=0.7, ge=0, le=2)
+    max_tokens: int = Field(default=160, ge=16, le=2048)
+    request_timeout_seconds: float = Field(default=10.0, ge=1, le=60)
     # --- Stage-2 speculative LLM (OFF by default — no behavior change) ---
     # When enabled, an out-of-band Cerebras draft is started on Deepgram Flux
     # EagerEndOfTurn and, if the normalized eager transcript matches the final
@@ -87,25 +92,29 @@ class LLMCfg(BaseModel):
     enable_speculative_llm: bool = False
 
 
-class TTSCfg(BaseModel):
+class TTSCfg(RuntimeModel):
+    """Cartesia model and user-selected voice."""
     provider: Literal["cartesia"] = "cartesia"
-    model: str = "sonic-3.5"
+    model: str = Field(default="sonic-3.6-2026-08-27", min_length=1)
     voice_id: str = ""
-    language_mode: Literal["per_turn", "fixed"] = "per_turn"
+    language_mode: Literal["per_turn"] = "per_turn"
 
 
-class PromptCfg(BaseModel):
-    system_prompt: str = DEFAULT_SYSTEM_PROMPT
-    greeting_prompt: str = DEFAULT_GREETING_PROMPT
+class PromptCfg(RuntimeModel):
+    """Persona and directly spoken opening text."""
+    system_prompt: str = Field(default=DEFAULT_SYSTEM_PROMPT, min_length=1)
+    greeting_text: str = Field(default=DEFAULT_GREETING_TEXT, min_length=1, max_length=500)
 
 
-class MemoryCfg(BaseModel):
-    recent_turn_pairs: int = 6
-    enable_running_summary_after_turn: int = 10
-    summary_update_every_turns: int = 5
-    max_summary_tokens: int = 250
-    max_pinned_facts: int = 12
-    max_recall_snippets: int = 2
+class MemoryCfg(RuntimeModel):
+    """Bounded in-conversation memory without another storage service."""
+
+    recent_turn_pairs: int = Field(default=6, ge=1, le=30)
+    enable_running_summary_after_turn: int = Field(default=10, ge=1, le=1000)
+    summary_update_every_turns: int = Field(default=5, ge=1, le=100)
+    max_summary_tokens: int = Field(default=250, ge=1, le=2000)
+    max_pinned_facts: int = Field(default=12, ge=0, le=100)
+    max_recall_snippets: int = Field(default=2, ge=0, le=10)
     # Min content-token overlap for a recall snippet to be injected (an explicit
     # "you told me…/pehle…" relaxes this to 1). Higher = less noise, fewer recalls.
     recall_min_overlap: int = Field(default=2, ge=1, le=6)
@@ -117,11 +126,14 @@ class MemoryCfg(BaseModel):
     recall_only_when_user_asks: bool = True
 
 
-class OpsCfg(BaseModel):
-    debug_log_level: str = "INFO"
+class OpsCfg(RuntimeModel):
+    """Frontend-editable local readiness and shutdown budgets."""
+    debug_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    browser_ready_timeout_secs: float = Field(default=30.0, ge=5, le=120)
+    shutdown_timeout_secs: float = Field(default=10.0, ge=1, le=30)
 
 
-class RuntimeConfig(BaseModel):
+class RuntimeConfig(RuntimeModel):
     """The single global runtime config document."""
 
     version: int = 1
@@ -133,23 +145,17 @@ class RuntimeConfig(BaseModel):
     ops: OpsCfg = Field(default_factory=OpsCfg)
 
     @model_validator(mode="after")
-    def _validate_speculative_requires_eager(self) -> "RuntimeConfig":
-        # Stage-2 speculation is triggered by Flux EagerEndOfTurn events, which are
-        # only emitted when stt.enable_eager_eot is on (and a threshold is set).
-        # Enabling speculation without eager would be silently inert, so surface it
-        # as a save error rather than a config that looks on but does nothing.
-        # No-op when speculation is off, so all existing stored configs validate.
-        if self.llm.enable_speculative_llm and not self.stt.enable_eager_eot:
-            raise ValueError(
-                "llm.enable_speculative_llm requires stt.enable_eager_eot "
-                "(speculation is triggered by EagerEndOfTurn events)"
-            )
+    def validate_browser_config(self) -> "RuntimeConfig":
+        """Reject settings that the browser prototype does not implement."""
+        if self.stt.enable_eager_eot or self.llm.enable_speculative_llm:
+            raise ValueError("Eager/speculative replies are disabled in the browser prototype")
+        if self.llm.model == "gpt-oss-120b" and self.llm.reasoning_effort == "none":
+            raise ValueError("GPT-OSS reasoning_effort must be low, medium, or high")
+        if not self.prompt.greeting_text.strip() or not self.prompt.system_prompt.strip():
+            raise ValueError("Greeting and system prompt cannot be blank")
         return self
 
     @classmethod
-    def default(cls, settings: Settings) -> "RuntimeConfig":
-        """Build the default config, seeding the TTS voice from env (Phase 1)."""
-
-        return cls(
-            tts=TTSCfg(voice_id=settings.tts_voice_id, model=settings.tts_model),
-        )
+    def default(cls, settings: object = None) -> "RuntimeConfig":
+        """Create canonical defaults without reading behavior from the environment."""
+        return cls()

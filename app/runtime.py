@@ -5,10 +5,8 @@ import json
 import time
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
-from loguru import logger
 
 from app.config import Settings
-from app.models.runtime_config_models import RuntimeConfig
 from app.services.runtime_config import build_effective_snapshot, get_cached_runtime_config
 
 
@@ -21,12 +19,11 @@ class ConfigSnapshot(TypedDict):
 
     runtime_config: dict[str, Any]
     SYSTEM_PROMPT: str
-    GREETING_PROMPT: str
+    GREETING_TEXT: str
     LLM_MODEL: str
     LLM_TEMPERATURE: float
     TTS_VOICE_ID: str
     TTS_MODEL: str
-    INITIAL_GREETING_FALLBACK_TEXT: str
     SAMPLE_RATE: int
     snapshot_version: NotRequired[str]
 
@@ -40,60 +37,21 @@ class RuntimeSession(TypedDict):
     transcript: list[dict[str, Any]]
     first_latency: float | None
     config_snapshot: ConfigSnapshot
-
-
-OpeningState = Literal[
-    "preparing",
-    "dialing",
-    "websocket_bound",
-    "greeting_speaking",
-    "awaiting_readiness",
-    "task_active",
-    "ended",
-]
-
-
-class PendingOutboundContext(TypedDict):
-    """Serializable context prepared before an outbound call connects."""
-
-    call_sid: str | None
-    to_number: str
-    config_snapshot: ConfigSnapshot
-    opening_state: OpeningState
-    greeting_text: str | None
-    greeting_error: str | None
-    greeting_metrics: dict[str, Any]
-    created_at: float
+    language_state: NotRequired[dict[str, Any]]
+    memory: NotRequired[dict[str, Any]]
 
 
 ACTIVE_SESSIONS: MutableMapping[str, RuntimeSession] = {}
-PENDING_OUTBOUND_CALLS: MutableMapping[str, PendingOutboundContext] = {}
 
 
 def build_config_snapshot(
     settings: Settings,
     profile_id: str | None = None,
 ) -> ConfigSnapshot:
-    """Create the immutable per-call config snapshot from the runtime config.
-
-    Uses the process-cached global runtime config when available (populated at
-    startup / on save); falls back to the canonical default config only when no
-    cache exists yet (e.g. unit tests without Mongo). ``profile_id`` is accepted
-    for signature compatibility but ignored — V3 has a single global config.
-    """
-
+    """Create an isolated snapshot of the loaded configuration."""
     config = get_cached_runtime_config()
     if config is None:
-        # Startup REQUIRES Mongo and seeds the cache, so for a real call this is
-        # never None. If it is, something is wrong — log loudly (ERROR) rather
-        # than silently serving a default. Outbound calls never reach here: they
-        # load config live and refuse to dial on failure (see dashboard.py).
-        logger.error(
-            "build_config_snapshot: no cached runtime config; falling back to the "
-            "canonical default. This should only happen in tests / before startup "
-            "seeding — a real call hitting this means Mongo seeding did not run."
-        )
-        config = RuntimeConfig.default(settings)
+        raise RuntimeError("Runtime configuration has not been initialized")
     return cast(ConfigSnapshot, build_effective_snapshot(config))
 
 
@@ -178,75 +136,6 @@ def merge_session_metrics(call_sid: str, metrics: dict[str, Any]) -> None:
     if session is None:
         return
     session["metrics"].update(json.loads(json.dumps(metrics)))
-
-
-def create_pending_outbound_context(
-    *,
-    to_number: str,
-    config_snapshot: ConfigSnapshot,
-    greeting_text: str | None = None,
-    greeting_error: str | None = None,
-    greeting_metrics: dict[str, Any] | None = None,
-) -> PendingOutboundContext:
-    """Create a pending outbound context before Exotel returns a call SID."""
-
-    return {
-        "call_sid": None,
-        "to_number": to_number,
-        "config_snapshot": config_snapshot,
-        "opening_state": "preparing",
-        "greeting_text": greeting_text,
-        "greeting_error": greeting_error,
-        "greeting_metrics": json.loads(json.dumps(greeting_metrics or {})),
-        "created_at": time.time(),
-    }
-
-
-def attach_pending_call_sid(
-    context: PendingOutboundContext,
-    *,
-    call_sid: str,
-) -> PendingOutboundContext:
-    """Attach Exotel's call SID and register the pending outbound context."""
-
-    context["call_sid"] = call_sid
-    context["opening_state"] = "dialing"
-    PENDING_OUTBOUND_CALLS[call_sid] = context
-    return context
-
-
-def get_pending_outbound_context(call_sid: str) -> PendingOutboundContext | None:
-    """Return a pending outbound context by Exotel call SID, if present."""
-
-    return PENDING_OUTBOUND_CALLS.get(call_sid)
-
-
-def cleanup_expired_pending_outbound_contexts(max_age_secs: float) -> int:
-    """Remove pending outbound contexts older than max_age_secs."""
-
-    now = time.time()
-    expired_call_sids = [
-        call_sid
-        for call_sid, context in PENDING_OUTBOUND_CALLS.items()
-        if now - context["created_at"] > max_age_secs
-    ]
-    for call_sid in expired_call_sids:
-        PENDING_OUTBOUND_CALLS.pop(call_sid, None)
-    return len(expired_call_sids)
-
-
-def pop_pending_outbound_context(call_sid: str) -> PendingOutboundContext | None:
-    """Remove and return a pending outbound context by Exotel call SID."""
-
-    return PENDING_OUTBOUND_CALLS.pop(call_sid, None)
-
-
-def update_pending_opening_state(call_sid: str, opening_state: OpeningState) -> None:
-    """Update pending outbound opening state if the context is still present."""
-
-    context = PENDING_OUTBOUND_CALLS.get(call_sid)
-    if context is not None:
-        context["opening_state"] = opening_state
 
 
 def get_session_language_state(call_sid: str) -> dict[str, Any] | None:

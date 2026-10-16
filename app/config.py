@@ -1,4 +1,4 @@
-"""Typed application configuration for the voice agent project."""
+"""Server credentials and the fixed audio contract."""
 
 from functools import lru_cache
 from typing import Final
@@ -10,75 +10,17 @@ V1_SAMPLE_RATE: Final[int] = 16000
 
 
 class Settings(BaseSettings):
-    """Environment-backed settings used across application phases."""
+    """Secrets and server settings; behavior lives in the local runtime config."""
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
-
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True)
     host: str = Field(default="127.0.0.1", alias="HOST")
-    port: int = Field(default=8000, alias="PORT")
-    deepgram_api_key: str = Field(alias="DEEPGRAM_API_KEY")
-    cerebras_api_key: str = Field(alias="CEREBRAS_API_KEY")
-    cartesia_api_key: str = Field(alias="CARTESIA_API_KEY")
-    # --- V3: behavior/tuning lives in the Mongo runtime_config, not .env. ---
-    # tts_voice_id / tts_model remain here only as the Phase 1 seed for the
-    # default runtime config; the rest are deprecated optional shims kept so
-    # legacy code paths and tests still construct Settings without these vars.
-    tts_voice_id: str = Field(default="", alias="TTS_VOICE_ID")
-    tts_model: str = Field(default="sonic-3.5", alias="TTS_MODEL")
-    system_prompt: str = Field(default="", alias="SYSTEM_PROMPT")
-    llm_model: str = Field(default="gpt-oss-120b", alias="LLM_MODEL")
-    llm_temperature: float = Field(default=0.7, alias="LLM_TEMPERATURE")
-    initial_greeting_prompt: str = Field(default="", alias="INITIAL_GREETING_PROMPT")
-    initial_greeting_instructions: str = Field(
-        default="",
-        alias="INITIAL_GREETING_INSTRUCTIONS",
-    )
-    initial_greeting_fallback_text: str = Field(
-        default="",
-        alias="INITIAL_GREETING_FALLBACK_TEXT",
-    )
-    outbound_greeting_prep_timeout_secs: float = Field(
-        default=2.0,
-        alias="OUTBOUND_GREETING_PREP_TIMEOUT_SECS",
-    )
-    outbound_greeting_start_delay_ms: int = Field(
-        default=0,
-        alias="OUTBOUND_GREETING_START_DELAY_MS",
-    )
-    # Settle delay between the carrier (Exotel) client connecting and the bot
-    # speaking its opening greeting. Producing audio in the first instant after
-    # the media stream opens lets the carrier drop it (synthesized on our side but
-    # never heard by the caller). Used when no explicit greeting_start_delay_ms is
-    # provided. Set 0 to speak immediately on connect.
-    greeting_settle_delay_ms: int = Field(
-        default=500,
-        alias="GREETING_SETTLE_DELAY_MS",
-    )
-    pending_outbound_ttl_secs: float = Field(
-        default=600.0,
-        alias="PENDING_OUTBOUND_TTL_SECS",
-    )
-    mongo_uri: str = Field(alias="MONGO_URI")
-    mongo_db_name: str = Field(alias="MONGO_DB_NAME")
-
-    # --- Exotel Outbound Configuration ---
-    exotel_account_sid: str = Field(alias="EXOTEL_ACCOUNT_SID")
-    exotel_api_key: str = Field(alias="EXOTEL_API_KEY")
-    exotel_api_token: str = Field(alias="EXOTEL_API_TOKEN")
-    exotel_virtual_number: str = Field(alias="EXOTEL_VIRTUAL_NUMBER")
-    exotel_flow_id: str = Field(alias="EXOTEL_FLOW_ID")
-    exotel_subdomain: str = Field(
-        default="api.in.exotel.com", alias="EXOTEL_SUBDOMAIN"
-    )
-    public_ngrok_url: str = Field(alias="PUBLIC_NGROK_URL")
+    port: int = Field(default=8000, alias="PORT", ge=1, le=65535)
+    deepgram_api_key: str = Field(alias="DEEPGRAM_API_KEY", min_length=1, repr=False)
+    cerebras_api_key: str = Field(alias="CEREBRAS_API_KEY", min_length=1, repr=False)
+    cartesia_api_key: str = Field(alias="CARTESIA_API_KEY", min_length=1, repr=False)
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Return a cached settings instance."""
-
+    """Return the cached server settings."""
     return Settings()

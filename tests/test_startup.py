@@ -1,60 +1,40 @@
-"""Startup behavior: MongoDB is required (no warn-and-continue); warmup runs."""
+"""Startup uses files; failed configuration cannot be silently replaced."""
 
-import pytest
 from unittest.mock import AsyncMock, patch
+import pytest
 from fastapi.testclient import TestClient
 
 from main import app
 
 
-def test_startup_succeeds_and_seeds_when_db_ok():
-    with patch("main.init_database", new_callable=AsyncMock) as init, \
-         patch("main.seed_runtime_config_if_missing", new_callable=AsyncMock) as seed, \
-         patch("main.run_local_warmup", new_callable=AsyncMock), \
-         patch("main.close_database", new_callable=AsyncMock):
+def test_startup_loads_files_and_runs_local_warmup():
+    with patch("main.run_local_warmup", new_callable=AsyncMock) as warm:
+        with TestClient(app) as client:
+            assert client.get("/").status_code == 200
+            assert client.get("/telephony/webhook").status_code == 404
+        warm.assert_awaited_once()
+
+
+def test_startup_rejects_corrupt_config():
+    from app import storage
+    storage.DATA_DIR.mkdir()
+    path = storage.DATA_DIR / "runtime_config.json"
+    path.write_text("{broken", encoding="utf-8")
+    with pytest.raises(ValueError):
         with TestClient(app):
             pass
-        init.assert_awaited()
-        seed.assert_awaited()  # runtime config seed/load attempted at startup
+    assert path.read_text(encoding="utf-8") == "{broken"
 
 
-def test_startup_invokes_local_warmup():
-    with patch("main.init_database", new_callable=AsyncMock), \
-         patch("main.seed_runtime_config_if_missing", new_callable=AsyncMock), \
-         patch("main.run_local_warmup", new_callable=AsyncMock) as warm, \
-         patch("main.close_database", new_callable=AsyncMock):
-        with TestClient(app):
-            pass
-        warm.assert_awaited()
-
-
-def test_startup_fails_clearly_when_mongo_unavailable():
-    with patch("main.init_database", new_callable=AsyncMock) as init, \
-         patch("main.run_local_warmup", new_callable=AsyncMock), \
-         patch("main.close_database", new_callable=AsyncMock):
-        init.side_effect = RuntimeError("mongo unavailable")
-        with pytest.raises(Exception):
+def test_startup_rejects_unwritable_storage():
+    with patch("app.storage.initialize_storage", new=AsyncMock(side_effect=OSError("denied"))):
+        with pytest.raises(OSError, match="denied"):
             with TestClient(app):
                 pass
 
 
-def test_startup_tolerates_seed_failure_but_still_starts():
-    # init_database succeeded (Mongo up); seeding hiccup must not crash startup,
-    # but per-call config load still guards outbound separately.
-    with patch("main.init_database", new_callable=AsyncMock), \
-         patch("main.seed_runtime_config_if_missing", new_callable=AsyncMock) as seed, \
-         patch("main.run_local_warmup", new_callable=AsyncMock), \
-         patch("main.close_database", new_callable=AsyncMock):
-        seed.side_effect = RuntimeError("seed hiccup")
-        with TestClient(app) as c:
-            assert c.get("/config").status_code == 200
-
-
-def test_startup_tolerates_warmup_failure_but_still_starts():
-    with patch("main.init_database", new_callable=AsyncMock), \
-         patch("main.seed_runtime_config_if_missing", new_callable=AsyncMock), \
-         patch("main.run_local_warmup", new_callable=AsyncMock) as warm, \
-         patch("main.close_database", new_callable=AsyncMock):
-        warm.side_effect = RuntimeError("warmup boom")
-        with TestClient(app) as c:
-            assert c.get("/config").status_code == 200
+def test_startup_rejects_missing_build(tmp_path):
+    with patch("main.STATIC_DIR", tmp_path):
+        with pytest.raises(RuntimeError, match="assets missing"):
+            with TestClient(app):
+                pass

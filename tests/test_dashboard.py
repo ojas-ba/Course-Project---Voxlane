@@ -11,8 +11,7 @@ from app.runtime import ACTIVE_SESSIONS
 @pytest.fixture
 def client():
     ACTIVE_SESSIONS.clear()
-    with patch("main.init_database", new_callable=AsyncMock), \
-         patch("main.close_database", new_callable=AsyncMock):
+    with patch("main.run_local_warmup", new_callable=AsyncMock):
         with TestClient(app) as test_client:
             yield test_client
     ACTIVE_SESSIONS.clear()
@@ -24,19 +23,19 @@ def test_config_page_renders(client):
     assert "text/html" in response.headers["content-type"]
     assert "Runtime Configuration" in response.text
     assert "flux-general-multi" in response.text  # default STT model shown
-    assert "Place outbound call" in response.text
+    assert "Place outbound call" not in response.text
     # Grouped sections + new editable fields with helper text.
     assert "Defer connect on start" in response.text
     assert "Memory" in response.text
     assert "EOT timeout (ms)" in response.text
     assert "Turn stop debounce timeout" in response.text  # LAT-2 configurable debounce
-    assert "Enable EagerEOT telemetry" in response.text     # Stage-1 eager probe config
+    assert "Enable EagerEOT telemetry" not in response.text     # Stage-1 eager probe config
 
 
-def test_root_renders_config(client):
+def test_root_renders_browser(client):
     response = client.get("/")
     assert response.status_code == 200
-    assert "Runtime Configuration" in response.text
+    assert "Start conversation" in response.text
 
 
 def test_config_save(client):
@@ -52,7 +51,8 @@ def test_config_save(client):
                 "stt_language_hints": "en, hi",
                 "stt_eot_threshold": "0.65",
                 "stt_eot_timeout_ms": "700",
-                "llm_model": "gpt-oss-120b",
+                "llm_model": "qwen-3.8-27b",
+                "llm_reasoning_effort": "none",
                 "llm_temperature": "0.7",
                 "llm_max_tokens": "160",
                 "llm_request_timeout_seconds": "10",
@@ -60,7 +60,7 @@ def test_config_save(client):
                 "tts_voice_id": "voice-x",
                 "tts_language_mode": "per_turn",
                 "system_prompt": "Be helpful.",
-                "greeting_prompt": "Say hi.",
+                "greeting_text": "Say hi.",
                 "debug_log_level": "INFO",
             },
         )
@@ -77,13 +77,13 @@ def test_calls_list_renders(client):
         mock_fetch.return_value = ([], True)
         response = client.get("/calls")
     assert response.status_code == 200
-    assert "No calls yet." in response.text
+    assert "No conversations yet." in response.text
 
 
 def test_call_detail_renders_turn_table(client):
     fake_log = {
         "_id": "x",
-        "call_sid": "call_abc",
+        "call_sid": "browser_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "stream_sid": "stream_abc",
         "config_snapshot": {"runtime_config": {"llm": {"model": "gpt-oss-120b"}}},
         "transcript": [{"role": "assistant", "phase": "greeting", "text": "Hi there!"}],
@@ -101,15 +101,11 @@ def test_call_detail_renders_turn_table(client):
         },
     }
 
-    async def _find_one(query):
-        return fake_log
-
-    fake_collection = {"call_logs": type("C", (), {"find_one": staticmethod(_find_one)})()}
-    with patch("app.routers.dashboard.get_database", return_value=fake_collection):
-        response = client.get("/calls/call_abc")
+    with patch("app.routers.dashboard.get_call_log", new=AsyncMock(return_value=fake_log)):
+        response = client.get("/calls/browser_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
     assert response.status_code == 200
-    assert "call_abc" in response.text
+    assert "browser_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" in response.text
     assert "Hi there!" in response.text
     assert "hello" in response.text
     assert "850 ms" in response.text
@@ -118,7 +114,7 @@ def test_call_detail_renders_turn_table(client):
 def test_call_detail_renders_breakdown_merged_and_error(client):
     fake_log = {
         "_id": "x",
-        "call_sid": "call_xyz",
+        "call_sid": "browser_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "stream_sid": "s",
         "config_snapshot": {"runtime_config": {}},
         "transcript": [{"role": "assistant", "phase": "greeting", "text": "Hi!"}],
@@ -144,12 +140,8 @@ def test_call_detail_renders_breakdown_merged_and_error(client):
         },
     }
 
-    async def _find_one(query):
-        return fake_log
-
-    fake_collection = {"call_logs": type("C", (), {"find_one": staticmethod(_find_one)})()}
-    with patch("app.routers.dashboard.get_database", return_value=fake_collection):
-        response = client.get("/calls/call_xyz")
+    with patch("app.routers.dashboard.get_call_log", new=AsyncMock(return_value=fake_log)):
+        response = client.get("/calls/browser_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 
     assert response.status_code == 200
     assert "merged 3, 4" in response.text                 # merged ids visible
@@ -205,7 +197,7 @@ def test_memory_summary_aggregates():
 
 def test_call_detail_renders_memory_block(client):
     fake_log = {
-        "_id": "x", "call_sid": "call_mem", "stream_sid": "s",
+        "_id": "x", "call_sid": "browser_cccccccccccccccccccccccccccccccc", "stream_sid": "s",
         "config_snapshot": {"runtime_config": {}},
         "transcript": [{"role": "assistant", "phase": "greeting", "text": "Hi!"}],
         "metrics": {
@@ -228,12 +220,8 @@ def test_call_detail_renders_memory_block(client):
         },
     }
 
-    async def _find_one(query):
-        return fake_log
-
-    fake_collection = {"call_logs": type("C", (), {"find_one": staticmethod(_find_one)})()}
-    with patch("app.routers.dashboard.get_database", return_value=fake_collection):
-        response = client.get("/calls/call_mem")
+    with patch("app.routers.dashboard.get_call_log", new=AsyncMock(return_value=fake_log)):
+        response = client.get("/calls/browser_cccccccccccccccccccccccccccccccc")
 
     assert response.status_code == 200
     assert "recall yes" in response.text                     # per-turn recall badge
@@ -245,7 +233,7 @@ def test_call_detail_renders_memory_block(client):
 
 def test_call_detail_renders_eager_probe(client):
     fake_log = {
-        "_id": "x", "call_sid": "call_eager", "stream_sid": "s",
+        "_id": "x", "call_sid": "browser_dddddddddddddddddddddddddddddddd", "stream_sid": "s",
         "config_snapshot": {"runtime_config": {}},
         "transcript": [{"role": "assistant", "phase": "greeting", "text": "Hi!"}],
         "metrics": {
@@ -267,12 +255,8 @@ def test_call_detail_renders_eager_probe(client):
         },
     }
 
-    async def _find_one(query):
-        return fake_log
-
-    fake_collection = {"call_logs": type("C", (), {"find_one": staticmethod(_find_one)})()}
-    with patch("app.routers.dashboard.get_database", return_value=fake_collection):
-        response = client.get("/calls/call_eager")
+    with patch("app.routers.dashboard.get_call_log", new=AsyncMock(return_value=fake_log)):
+        response = client.get("/calls/browser_dddddddddddddddddddddddddddddddd")
 
     assert response.status_code == 200
     assert "EagerEOT speculative probe" in response.text    # call-level summary panel
@@ -285,7 +269,7 @@ def test_call_detail_renders_eager_probe(client):
 def test_call_detail_renders_overlap_ready_and_latest_commit(client):
     # MET-1 (overlap), OBS-1 (tri-state STT ready), LAT-1 (latest Commit->LLM).
     fake_log = {
-        "_id": "x", "call_sid": "call_ovl", "stream_sid": "s",
+        "_id": "x", "call_sid": "browser_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "stream_sid": "s",
         "config_snapshot": {"runtime_config": {}},
         "transcript": [{"role": "assistant", "phase": "greeting", "text": "Hi!"}],
         "metrics": {
@@ -311,12 +295,8 @@ def test_call_detail_renders_overlap_ready_and_latest_commit(client):
         },
     }
 
-    async def _find_one(query):
-        return fake_log
-
-    fake_collection = {"call_logs": type("C", (), {"find_one": staticmethod(_find_one)})()}
-    with patch("app.routers.dashboard.get_database", return_value=fake_collection):
-        response = client.get("/calls/call_ovl")
+    with patch("app.routers.dashboard.get_call_log", new=AsyncMock(return_value=fake_log)):
+        response = client.get("/calls/browser_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
 
     assert response.status_code == 200
     assert "overlap 9" in response.text                       # MET-1: negative shown as overlap

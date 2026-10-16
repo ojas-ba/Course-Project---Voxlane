@@ -1,34 +1,5 @@
 from app.config import get_settings
-from app.runtime import (
-    PENDING_OUTBOUND_CALLS,
-    append_session_transcript_event,
-    attach_pending_call_sid,
-    build_config_snapshot,
-    cleanup_expired_pending_outbound_contexts,
-    create_pending_outbound_context,
-    create_session,
-    delete_session,
-    get_pending_outbound_context,
-    get_session,
-    pop_pending_outbound_context,
-)
-
-
-def test_pending_outbound_context_lifecycle():
-    PENDING_OUTBOUND_CALLS.clear()
-    settings = get_settings()
-    context = create_pending_outbound_context(
-        to_number="+919876543210",
-        config_snapshot=build_config_snapshot(settings),
-        greeting_text="Hi there.",
-    )
-
-    assert context["call_sid"] is None
-    attach_pending_call_sid(context, call_sid="call_123")
-
-    assert get_pending_outbound_context("call_123") == context
-    assert pop_pending_outbound_context("call_123") == context
-    assert get_pending_outbound_context("call_123") is None
+from app.runtime import ACTIVE_SESSIONS, append_session_transcript_event, create_session, delete_session, get_session, get_session_transcript
 
 
 def test_append_session_transcript_event():
@@ -55,17 +26,3 @@ def test_append_session_transcript_event():
         ]
     finally:
         delete_session("call_123")
-
-
-def test_cleanup_expired_pending_outbound_contexts():
-    PENDING_OUTBOUND_CALLS.clear()
-    settings = get_settings()
-    context = create_pending_outbound_context(
-        to_number="+919876543210",
-        config_snapshot=build_config_snapshot(settings),
-    )
-    attach_pending_call_sid(context, call_sid="call_123")
-    context["created_at"] = 0.0
-
-    assert cleanup_expired_pending_outbound_contexts(1.0) == 1
-    assert get_pending_outbound_context("call_123") is None

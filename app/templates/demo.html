@@ -1,0 +1,38 @@
+{% extends "_base.html" %}
+{% block title %}Voice Agent — Talk{% endblock %}
+{% block head %}
+<script type="module" src="/static/demo.js"></script>
+<style>
+  .demo { max-width:760px; margin:2rem auto; }
+  .demo h1 { font-size:2.2rem; margin-bottom:.4rem; }
+  .controls { display:flex; flex-wrap:wrap; gap:.7rem; margin:1.3rem 0; }
+  button:disabled { opacity:.45; cursor:default; }
+  .transcript { min-height:220px; max-height:52vh; overflow:auto; padding:1rem; }
+  .utterance { padding:.6rem 0; border-bottom:1px solid var(--border); white-space:pre-wrap; }
+  .utterance strong { display:block; font-size:.7rem; color:var(--muted); margin-bottom:.25rem; }
+  .draft { opacity:.65; }
+  meter { width:90px; vertical-align:middle; }
+  #audio-enable { margin:.8rem 0; }
+  [hidden] { display:none !important; }
+</style>
+{% endblock %}
+{% block content %}
+<main class="demo">
+  <h1>Let’s talk.</h1>
+  <p class="muted">A voice conversation in English or Hindi. Set your voice and preferences in <a href="/config">Settings</a>.</p>
+  <div class="controls">
+    <button id="start" type="button">Start conversation</button>
+    <button id="mute" type="button" disabled aria-pressed="false">Mute</button>
+    <button id="end" type="button" disabled>End</button>
+  </div>
+  <p role="status" aria-live="polite"><span id="status">Ready when you are.</span> <meter id="mic-level" min="0" max="1" value="0" aria-label="Microphone activity"></meter></p>
+  <p id="error" class="status err" role="alert" hidden></p>
+  <button id="audio-enable" type="button" hidden>Enable audio</button>
+  <p id="history" hidden><a id="history-link">View saved conversation</a></p>
+  <section id="transcript" class="panel transcript" aria-label="Conversation transcript" aria-live="polite">
+    <p id="empty" class="muted">Your conversation will appear here.</p>
+  </section>
+  <p class="muted">The agent listens after its greeting and between replies. Headphones can help prevent speaker echo.</p>
+  <audio id="bot-audio" autoplay playsinline></audio>
+</main>
+{% endblock %}

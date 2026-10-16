@@ -12,6 +12,7 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from app.config import get_settings
+from app.services.runtime_config import load_runtime_config, build_effective_snapshot
 from app.services.pipecat_pipeline import _build_tts
 
 class MockSourceNode(FrameProcessor):
@@ -72,10 +73,8 @@ class MetricsCollector(FrameProcessor):
 async def test_live_tts_metrics():
     """Test Cartesia TTS API and measure synthesis metrics in isolation."""
     settings = get_settings()
-    snapshot = {
-        "TTS_VOICE_ID": settings.tts_voice_id,
-        "TTS_MODEL": settings.tts_model,
-    }
+    snapshot = build_effective_snapshot(await load_runtime_config(settings))
+    assert snapshot["TTS_VOICE_ID"], "Choose a voice in /config before running this live check"
     
     tts = _build_tts(snapshot, settings)
     source = MockSourceNode([

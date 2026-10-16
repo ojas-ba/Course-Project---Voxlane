@@ -41,7 +41,7 @@ sequenceDiagram
     participant Obs as TurnMetricsObserver
     participant Frames as Pipeline frames
     participant RT as runtime.append_turn_record
-    participant Mongo as call_logs
+    participant Files as JSON files
     Flux->>Obs: note_user_turn() → _pending_turns.append()
     Note over Obs: anchors snapshotted · memory marks pinned
     Frames->>Obs: LLMFullResponseStartFrame
@@ -53,8 +53,8 @@ sequenceDiagram
     Obs->>Obs: _try_finalize(): audio_seen AND llm_noted
     Obs->>Obs: _emit(): stage deltas + anchor + probes + memory
     Obs->>RT: on_record(rec) → session.turn_records
-    Note over Obs,Mongo: at call end → finalize_call_log → persist
-    RT->>Mongo: insert_one(CallLog)
+    Note over Obs,Files: at call end → finalize_call_log → persist
+    RT->>Files: atomic StoredConversation write
 ```
 
 1. **Queue** — `note_user_turn` builds a pending dict with the user text, the stop/EOT/commit anchors,
@@ -69,7 +69,7 @@ sequenceDiagram
    probes, and calls `on_record` → `append_turn_record` (which JSON round-trips the record into the
    session and refreshes the running summary).
 6. **Persist** — at call end, `finalize_call_log` packages all records into a `CallLog` and writes it to
-   the Mongo `call_logs` collection.
+   a versioned JSON envelope under `data/conversations/`.
 
 ---
 
@@ -207,7 +207,7 @@ CallLog = { call_sid, stream_sid, config_snapshot, metrics: CallMetrics,
 ```
 
 `turn_records` is an open `list[dict[str, Any]]` at every layer — adding a new per-turn field needs no
-schema change (it JSON round-trips through `append_turn_record` into Mongo). The full `TurnRecord` field
+schema change (it JSON round-trips through `append_turn_record` into the local JSON payload). The full `TurnRecord` field
 list is in §3 above plus the `eager_probe` and `memory` sub-objects.
 
 ---

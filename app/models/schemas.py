@@ -1,6 +1,6 @@
 """Typed schemas for call-level and turn-level persistence data.
 
-These Pydantic models define the persistence-safe shapes written to MongoDB.
+These Pydantic models define the persistence-safe shapes written to local JSON.
 They are output schemas only — internal runtime containers remain as
 plain dicts in app/runtime.py.
 
@@ -50,14 +50,14 @@ class CallMetrics(BaseModel):
 class CallLog(BaseModel):
     """Top-level persistence document for a completed call.
 
-    This is the shape written to the call_logs MongoDB collection.
+    The file envelope stores this payload without database-specific fields.
     Transcript uses role-based events so greetings can be stored without
     requiring a paired user turn.
     """
 
     call_sid: str
     stream_sid: str
-    config_snapshot: dict  # ConfigSnapshot as plain dict for MongoDB
+    config_snapshot: dict[str, Any]  # JSON-safe ConfigSnapshot
     metrics: CallMetrics = Field(default_factory=CallMetrics)
     transcript: list[TranscriptEvent] = Field(default_factory=list)
     completed: bool = True

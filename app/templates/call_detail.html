@@ -1,5 +1,5 @@
 {% extends "_base.html" %}
-{% block title %}Call {{ log.call_sid }}{% endblock %}
+{% block title %}Conversation {{ log.call_sid }}{% endblock %}
 
 {% macro ms(v) %}{{ ('%.0f ms' % v) if v is number else '—' }}{% endmacro %}
 {% macro latbadge(value) %}<span class="badge {% if value is not number %}neutral{% elif value > 5000 %}crit{% elif value > 2000 %}warn{% else %}ok{% endif %}">{{ ('%.0f ms' % value) if value is number else '—' }}</span>{% endmacro %}
@@ -7,7 +7,7 @@
 {% macro chip(label, value, warn=2000, crit=5000) %}<span class="chip {% if value is number and value > crit %}crit{% elif value is number and value > warn %}warn{% endif %}">{{ label }} <b>{{ ('%.0f' % value) if value is number else '—' }}</b></span>{% endmacro %}
 
 {% block content %}
-  <h1>Call <code>{{ log.call_sid }}</code></h1>
+  <h1>Conversation <code>{{ log.call_sid }}</code></h1>
   <div class="muted">{{ log.created_at }} · stream <code>{{ log.stream_sid }}</code>
     {% if log.get('error') %}· <span class="err">error: {{ log.error }}</span>{% endif %}</div>
 
@@ -17,7 +17,7 @@
       <div class="lbl">Responsiveness · median</div>
       <div class="big">{{ respbadge(latency.responsiveness.median) }}</div>
       <div class="sub">avg {{ ms(latency.responsiveness.avg) }} · p95 {{ ms(latency.responsiveness.p95) }} · max {{ ms(latency.responsiveness.max) }}</div>
-      <div class="cap">last word → first audio · what the caller feels</div>
+      <div class="cap">turn release → first audio · server timing</div>
     </div>
     <div class="card">
       <div class="lbl">Total · median</div>
@@ -28,8 +28,8 @@
     <div class="card"><div class="lbl">Greeting source</div><div class="val">{{ log.get('metrics', {}).get('greeting_text_source', '—') }}</div></div>
   </div>
   <p class="muted">Latency over <b>{{ latency.responsiveness.n }}</b> of {{ turn_records | length }} timed turns.
-    <b style="color:var(--fg)">Responsiveness</b> is the felt wait — time from your last word to the bot's first audio; it excludes the endpointing window (the system confirming you stopped) and any mid-thought pause on a merged turn.
-    <b style="color:var(--fg)">Total</b> is the VAD-anchored physical wait from true silence. Both are server-side proxies (BotStartedSpeakingFrame), not phone-speaker playback.</p>
+    <b style="color:var(--fg)">Responsiveness</b> is the server response delay from turn release to the bot's first audio; it excludes the endpointing window (the system confirming you stopped) and any mid-thought pause on a merged turn.
+    <b style="color:var(--fg)">Total</b> is the VAD-anchored physical wait from true silence. Both measure server events, not actual browser-speaker playback.</p>
 
   {% if eager_summary %}
   <div class="panel">

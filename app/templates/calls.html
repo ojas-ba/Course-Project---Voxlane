@@ -1,19 +1,19 @@
 {% extends "_base.html" %}
-{% block title %}Voice Agent — Calls{% endblock %}
+{% block title %}Voice Agent — Conversations{% endblock %}
 {% block content %}
-  <h1>Calls</h1>
+  <h1>Conversations</h1>
   {% if not db_connected %}<div class="status err">Database not connected — cannot list calls.</div>{% endif %}
 
   <p class="muted" style="margin:.2rem 0 1rem;">
-    <b style="color:var(--fg)">Responsiveness</b> = median time from your last word to the bot's first audio (the felt latency).
-    <b style="color:var(--fg)">Total</b> = median including the endpointing window the caller doesn't perceive.
-    Both are server-side proxies, not phone-speaker playback.
+    <b style="color:var(--fg)">Responsiveness</b> = median server time from turn release to the bot's first audio.
+    <b style="color:var(--fg)">Total</b> = median including the speech endpointing window.
+    Both are server-side proxies, not browser-speaker playback.
   </p>
 
   <div class="panel" style="padding:.4rem .2rem;">
   <table>
     <thead><tr>
-      <th>Call</th><th>Status</th><th>Turns</th>
+      <th>Conversation</th><th>Status</th><th>Turns</th>
       <th>Responsiveness</th><th>Total</th><th>Greeting</th><th>Created</th>
     </tr></thead>
     <tbody>
@@ -32,7 +32,7 @@
         <td class="muted">{{ log.created_at }}</td>
       </tr>
     {% else %}
-      <tr><td colspan="7"><div class="empty">{% if db_connected %}No calls yet. Place one from the Config page.{% else %}Database not connected.{% endif %}</div></td></tr>
+      <tr><td colspan="7"><div class="empty">{% if db_connected %}No conversations yet. Open Talk to start.{% else %}History storage is unavailable.{% endif %}</div></td></tr>
     {% endfor %}
     </tbody>
   </table>

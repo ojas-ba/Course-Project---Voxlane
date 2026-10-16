@@ -1,8 +1,0 @@
-<div class="status {{ 'ok' if success else 'err' }}">
-  {% if success %}
-    <strong>✓ Call placed.</strong> CallSid: <code>{{ call_sid }}</code> → {{ to_number }}
-    {% if greeting_text %}<div class="muted" style="margin-top:.4rem;font-style:italic;">Greeting: “{{ greeting_text }}”</div>{% endif %}
-  {% else %}
-    <strong>✗ Call not placed.</strong> {{ error }}
-  {% endif %}
-</div>

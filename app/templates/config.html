@@ -1,12 +1,21 @@
 {% extends "_base.html" %}
 {% block title %}Voice Agent — Config{% endblock %}
-{% block head %}<script src="https://unpkg.com/htmx.org@1.9.12"></script>{% endblock %}
+{% block head %}<script src="/static/htmx.min.js"></script>
+<script>
+  document.addEventListener('htmx:beforeSwap', function (event) {
+    if ([422, 503].includes(event.detail.xhr.status)) {
+      event.detail.shouldSwap = true;
+      event.detail.isError = false;
+    }
+  });
+</script>{% endblock %}
 {% block content %}
+<section id="settings-panel">
   <h1>Runtime Configuration</h1>
   {% if saved %}<p class="saved">✓ Saved.</p>{% endif %}
   {% if error %}<div class="status err">{{ error }}</div>{% endif %}
 
-  <form method="post" action="/config">
+  <form method="post" action="/config" hx-post="/config" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
     <fieldset><legend>STT — Deepgram Flux</legend>
       <label>Model</label><input name="stt_model" value="{{ config.stt.model }}" />
       <p class="hint">Use <code>flux-general-multi</code> for Hindi+English; language hints only apply to that model.</p>
@@ -42,21 +51,6 @@
           <p class="hint">Controls Pipecat's post-STT delay before triggering the LLM (NOT Deepgram <code>eot_timeout_ms</code>). Lower values reduce latency but may increase fragmented turns. Range 100–1000; default <code>500</code>.</p>
         </div>
       </div>
-      <div class="row">
-        <div>
-          <label>Enable EagerEOT telemetry</label>
-          <select name="stt_enable_eager_eot">
-            <option value="true" {{ 'selected' if config.stt.enable_eager_eot }}>true</option>
-            <option value="false" {{ 'selected' if not config.stt.enable_eager_eot }}>false</option>
-          </select>
-          <p class="hint">Stage-1 measurement only: asks Flux for EagerEndOfTurn events and records the would-be LLM head start. <strong>No speculative draft, no early speech.</strong> Default <code>false</code> (off = identical to today).</p>
-        </div>
-        <div>
-          <label>EagerEOT threshold</label>
-          <input name="stt_eager_eot_threshold" value="{{ config.stt.eager_eot_threshold if config.stt.eager_eot_threshold is not none else '' }}" />
-          <p class="hint">Confidence for the early EagerEndOfTurn signal. Must be ≤ EOT threshold; range 0.3–0.9. Only sent to Flux when EagerEOT is enabled. Leave blank for off.</p>
-        </div>
-      </div>
     </fieldset>
 
     <fieldset><legend>LLM — Cerebras</legend>
@@ -67,33 +61,24 @@
       <div class="row">
         <div>
           <label>Max tokens</label><input name="llm_max_tokens" value="{{ config.llm.max_tokens }}" />
-          <p class="hint">Caps reply length. Smaller = faster, shorter phone replies.</p>
+          <p class="hint">Caps reply length. Smaller = faster, shorter spoken replies.</p>
         </div>
         <div><label>Request timeout (s)</label><input name="llm_request_timeout_seconds" value="{{ config.llm.request_timeout_seconds }}" />
-          <p class="hint">Hard timeout per LLM request (wired to the Cerebras client) and the bound on outbound greeting generation.</p></div>
+          <p class="hint">Hard timeout per LLM request (wired to the Cerebras client).</p></div>
       </div>
-      <div class="row">
-        <div>
-          <label>Enable speculative LLM (Stage-2)</label>
-          <select name="llm_enable_speculative_llm">
-            <option value="true" {{ 'selected' if config.llm.enable_speculative_llm }}>true</option>
-            <option value="false" {{ 'selected' if not config.llm.enable_speculative_llm }}>false</option>
-          </select>
-          <p class="hint">Starts an out-of-band Cerebras draft on EagerEndOfTurn and releases it at EndOfTurn when the eager transcript matches the final — hiding the turn-stop debounce. <strong>Requires EagerEOT telemetry on.</strong> Default <code>false</code> (off = identical to today).</p>
-        </div>
-      </div>
+      <label>Reasoning effort</label>
+      <select name="llm_reasoning_effort">
+        {% for effort in ['none', 'low', 'medium', 'high'] %}
+          <option value="{{ effort }}" {{ 'selected' if config.llm.reasoning_effort == effort }}>{{ effort }}</option>
+        {% endfor %}
+      </select>
+      <p class="hint">Use none for quick Qwen replies. GPT-OSS requires low, medium, or high.</p>
     </fieldset>
 
     <fieldset><legend>TTS — Cartesia</legend>
       <div class="row">
         <div><label>Model</label><input name="tts_model" value="{{ config.tts.model }}" /></div>
         <div><label>Voice ID</label><input name="tts_voice_id" value="{{ config.tts.voice_id }}" /></div>
-        <div><label>Language mode</label>
-          <select name="tts_language_mode">
-            <option value="per_turn" {{ 'selected' if config.tts.language_mode == 'per_turn' }}>per_turn</option>
-            <option value="fixed" {{ 'selected' if config.tts.language_mode == 'fixed' }}>fixed</option>
-          </select>
-        </div>
       </div>
     </fieldset>
 
@@ -101,8 +86,8 @@
       <label>System prompt (persona)</label>
       <textarea name="system_prompt">{{ config.prompt.system_prompt }}</textarea>
       <p class="hint">The &lt;en&gt;/&lt;hi&gt; language contract is added by the system automatically — you don't need to mention it here.</p>
-      <label>Greeting prompt</label>
-      <textarea name="greeting_prompt">{{ config.prompt.greeting_prompt }}</textarea>
+      <label>Opening greeting text</label>
+      <textarea name="greeting_text">{{ config.prompt.greeting_text }}</textarea>
     </fieldset>
 
     <fieldset><legend>Memory</legend>
@@ -127,21 +112,15 @@
     </fieldset>
 
     <fieldset><legend>Ops</legend>
-      <label>Debug log level</label><input name="debug_log_level" value="{{ config.ops.debug_log_level }}" />
+      <label>Log level (next restart)</label><input name="debug_log_level" value="{{ config.ops.debug_log_level }}" />
+      <label>Browser readiness timeout (seconds)</label><input name="browser_ready_timeout_secs" value="{{ config.ops.browser_ready_timeout_secs }}" />
+      <label>Shutdown timeout (seconds)</label><input name="shutdown_timeout_secs" value="{{ config.ops.shutdown_timeout_secs }}" />
       <p class="hint">Set <code>DEBUG</code> to see Flux start/eager/resume turn events.</p>
     </fieldset>
 
+    <p class="hint">Choose a Cartesia voice ID before starting your first conversation.</p>
     <button type="submit">Save config</button>
   </form>
 
-  <div class="panel" style="margin-top:1.5rem;">
-    <h2>Place outbound call</h2>
-    <form hx-post="/telephony/outbound" hx-target="#outbound-status" hx-swap="innerHTML">
-      <label>Phone number (E.164)</label>
-      <input name="to_number" placeholder="+919876543210" />
-      <p class="hint">The LLM greeting is generated first; the call is not placed if greeting or config load fails.</p>
-      <button type="submit">Generate greeting &amp; call</button>
-    </form>
-    <div id="outbound-status"></div>
-  </div>
+</section>
 {% endblock %}

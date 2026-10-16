@@ -1,6 +1,6 @@
 """Pipecat pipeline service for the V3 open-ended voice agent.
 
-Assembles and runs the multilingual STT -> LLM -> TTS pipeline over the Exotel
+Assembles and runs the multilingual STT -> LLM -> TTS pipeline over the browser
 transport. Processor order:
 
     transport.input()
@@ -8,7 +8,7 @@ transport. Processor order:
       -> SttLanguageHintProcessor (records weak detected-language hint only)
       -> MemoryProcessor (system block = persona + <en>/<hi> policy + memory)
       -> context_aggregator.user()
-      -> Cerebras GPT-OSS LLM (reply starts with an <en>/<hi> tag)
+      -> Cerebras LLM (reply starts with an <en>/<hi> tag)
       -> LanguagePrefixProcessor (strip tag, set Cartesia language, stream text)
       -> Cartesia TTS
       -> transport.output()
@@ -23,14 +23,16 @@ The committed user turn is driven natively by Flux end-of-turn (finalized
 TranscriptionFrame + UserStoppedSpeakingFrame), which flushes the user
 aggregator into the LLM. TurnCollector + TurnMetricsObserver ride the
 ``on_end_of_turn`` side channel for commit/transcript/metrics; they do NOT
-generate replies. The pre-dial greeting is the only manually queued speech.
+generate replies. The configured greeting is the only manually queued speech.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Literal
+from typing import Any
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
@@ -53,7 +55,7 @@ from pipecat.services.cartesia.tts import CartesiaTTSService, CartesiaTTSSetting
 from pipecat.services.cerebras.llm import CerebrasLLMService, CerebrasLLMSettings
 from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 from pipecat.services.tts_service import TextAggregationMode
-from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport
+from pipecat.transports.base_transport import BaseTransport
 from pipecat.turns.user_mute import (
     AlwaysUserMuteStrategy,
     MuteUntilFirstBotCompleteUserMuteStrategy,
@@ -156,7 +158,7 @@ def _build_tts(snapshot: ConfigSnapshot, settings: Settings) -> CartesiaTTSServi
 
 
 def _build_llm(snapshot: ConfigSnapshot, settings: Settings) -> CerebrasLLMService:
-    """Construct the Cerebras GPT-OSS LLM service from the runtime config."""
+    """Construct the streamed Cerebras LLM service from the runtime config."""
 
     cfg = _llm_cfg(snapshot)
     # request_timeout_seconds is the real per-request timeout: OpenAI/Cerebras
@@ -166,9 +168,10 @@ def _build_llm(snapshot: ConfigSnapshot, settings: Settings) -> CerebrasLLMServi
     return CerebrasLLMService(
         api_key=settings.cerebras_api_key,
         settings=CerebrasLLMSettings(
-            model=cfg.get("model", "gpt-oss-120b"),
+            model=cfg.get("model", "qwen-3.8-27b"),
             temperature=cfg.get("temperature", 0.7),
-            max_tokens=cfg.get("max_tokens", 160),
+            max_completion_tokens=cfg.get("max_tokens", 160),
+            extra={"reasoning_effort": cfg.get("reasoning_effort", "none")},
         ),
         retry_timeout_secs=float(cfg.get("request_timeout_seconds", 10.0)),
     )
@@ -305,7 +308,7 @@ class SttLanguageHintProcessor(FrameProcessor):
 
 
 # Per-snippet/per-fact length cap before persisting memory marks, so a verbose
-# turn can't bloat the Mongo turn record or the dashboard (D7).
+# turn can't bloat the persisted turn record or the dashboard (D7).
 _MEMORY_SNIPPET_CAP = 200
 
 
@@ -438,60 +441,25 @@ def _record_greeting(*, call_sid: str, greeting_text: str) -> None:
     )
 
 
-def _schedule_opening_greeting(
-    *,
-    transport: Any,
-    task: Any,
-    log: Any,
-    call_sid: str,
-    greeting_text: str,
-    settle_ms: int,
-) -> dict[str, Any]:
-    """Speak the opening greeting once the carrier client is connected.
+@dataclass
+class PipelineHooks:
+    """Explicit live lifecycle callbacks, never stored in runtime data."""
 
-    Registers an ``on_client_connected`` handler — which the transport fires
-    unconditionally when its input starts — that, after a short settle delay,
-    records and queues the greeting. The greeting fires **autonomously**: it never
-    waits for the caller to speak. Speaking before the client is connected lets the
-    carrier (Exotel) drop the first audio (it is synthesized on our side, so
-    BotStartedSpeaking fires, but the caller never hears it). The settle delay runs
-    in a background task so it does not block transport startup. Returns a shared
-    state dict so the caller's disconnect handler can cancel a pending greeting.
-    """
-    state: dict[str, Any] = {"queued": False, "task": None}
-
-    async def _speak_greeting() -> None:
-        try:
-            if settle_ms > 0:
-                await asyncio.sleep(settle_ms / 1000)
-            _record_greeting(call_sid=call_sid, greeting_text=greeting_text)
-            update_session_metric(call_sid, "first_tts_frame_queued_at", time.time())
-            log.info("Speaking opening greeting", settle_ms=settle_ms, chars=len(greeting_text))
-            await task.queue_frame(TTSSpeakFrame(greeting_text, append_to_context=True))
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # greeting scheduling must never crash the call
-            log.warning("Failed to queue opening greeting: {err}", err=str(exc))
-
-    @transport.event_handler("on_client_connected")
-    async def _on_client_connected(transport_ref: Any, client: Any) -> None:
-        if state["queued"]:
-            return
-        state["queued"] = True
-        log.info("Exotel client connected; scheduling opening greeting", settle_ms=settle_ms)
-        state["task"] = asyncio.create_task(_speak_greeting())
-
-    return state
+    on_task: Callable[[PipelineTask, Callable[[], Awaitable[None]]], None]
+    on_connected: Callable[[], None]
+    on_disconnected: Callable[[], None]
+    on_error: Callable[[str], None]
 
 
 def _build_pipeline_processors(
     *,
-    transport: FastAPIWebsocketTransport,
+    transport: BaseTransport,
     snapshot: ConfigSnapshot,
     settings: Settings,
     call_sid: str,
     stream_sid: str | None,
     metrics_observer: TurnMetricsObserver,
+    on_provider_error: Callable[[str], None] | None = None,
 ) -> list[Any]:
     """Construct the full V3 processor list and wire the EOT side channel."""
 
@@ -529,6 +497,8 @@ def _build_pipeline_processors(
         async def _on_provider_error(_service: Any, error: Any) -> None:
             msg = getattr(error, "error", None) or str(error)
             metrics_observer.note_provider_error(stage=stage, message=f"{stage}: {msg}"[:300])
+            if on_provider_error is not None:
+                on_provider_error(f"{stage}: provider request failed")
 
     _register_provider_error(stt, "stt_provider_error")
     _register_provider_error(tts, "tts_provider_error")
@@ -685,14 +655,12 @@ class PipelineExecutionResult:
 
 async def run_pipeline(
     *,
-    transport: FastAPIWebsocketTransport,
+    transport: BaseTransport,
     call_sid: str,
     stream_sid: str,
     snapshot: ConfigSnapshot,
     settings: Settings,
-    prepared_greeting_text: str | None = None,
-    opening_mode: Literal["outbound", "default"] = "default",
-    greeting_start_delay_ms: int = 0,
+    hooks: PipelineHooks,
 ) -> PipelineExecutionResult:
     """Assemble and run the Pipecat pipeline for one call.
 
@@ -730,16 +698,16 @@ async def run_pipeline(
         on_record=_on_turn_record, language_provider=_language_provider
     )
 
-    pipeline = Pipeline(
-        _build_pipeline_processors(
+    processors = _build_pipeline_processors(
             transport=transport,
             snapshot=snapshot,
             settings=settings,
             call_sid=call_sid,
             stream_sid=stream_sid,
             metrics_observer=metrics_observer,
+            on_provider_error=hooks.on_error,
         )
-    )
+    pipeline = Pipeline(processors)
 
     latency_observer = UserBotLatencyObserver()
 
@@ -758,52 +726,30 @@ async def run_pipeline(
         log.info("First bot speech latency", latency_secs=f"{latency_seconds:.3f}")
         update_session_first_latency(call_sid, latency_seconds, observed_at=time.time())
 
-    # --- Initial greeting (bot speaks first) ---
-    # The greeting is spoken from on_client_connected (see _schedule_opening_greeting)
-    # so the carrier media path is up before we send audio, then a short settle
-    # delay. It fires autonomously — it never waits for the caller to speak.
-    is_outbound = opening_mode == "outbound"
-    if is_outbound and not (prepared_greeting_text or "").strip():
-        # F2/D5 fail-closed: an outbound call must NEVER speak the canned inbound
-        # greeting. A missing LLM greeting means the pending context was lost (process
-        # restart, TTL expiry, multi-worker, or greeting-generation failure). Record it
-        # and end the call rather than faking an inbound open with canned text.
-        log.warning("Outbound greeting missing; failing closed (no canned outbound greeting)")
-        update_session_metric(call_sid, "greeting_text_source", "missing_outbound_context")
-        update_session_metric(call_sid, "pending_context_missing", True)
-        return PipelineExecutionResult(
-            completed=False, error="outbound greeting missing (pending context lost)"
-        )
-
-    greeting_source = prepared_greeting_text if is_outbound else None
-    if greeting_source is None:
-        # Inbound/default path: the canned greeting IS legitimate here, but mark the
-        # static path so the dashboard can see it was used (the "clearly mark" half of F2).
-        update_session_metric(call_sid, "greeting_text_source", "static_inbound_default")
-    # Defensive: the greeting is spoken via TTSSpeakFrame and never passes through
-    # LanguagePrefixProcessor, so strip any leaked <en>/<hi> tag before it is
-    # spoken or stored (the outbound path also strips in validate_greeting_text) —
-    # LANG-1.
-    cleaned_greeting = lang.strip_language_prefix_tag(
-        _normalize_transcript_text(greeting_source or snapshot["INITIAL_GREETING_FALLBACK_TEXT"])
-    )
-    settle_ms = (
-        greeting_start_delay_ms
-        if greeting_start_delay_ms > 0
-        else settings.greeting_settle_delay_ms
-    )
-    greeting_state = _schedule_opening_greeting(
-        transport=transport, task=task, log=log, call_sid=call_sid,
-        greeting_text=cleaned_greeting, settle_ms=settle_ms,
-    )
+    @transport.event_handler("on_client_connected")
+    async def _on_client_connected(_transport: Any, _client: Any) -> None:
+        hooks.on_connected()
 
     @transport.event_handler("on_client_disconnected")
-    async def _on_client_disconnected(transport_ref: Any, client: Any) -> None:
-        log.info("Transport client disconnected, cancelling pipeline task")
-        greeting_task = greeting_state.get("task")
-        if greeting_task is not None and not greeting_task.done():
-            greeting_task.cancel()
-        await task.cancel()
+    async def _on_client_disconnected(_transport: Any, _client: Any) -> None:
+        hooks.on_disconnected()
+
+    stt = processors[1]
+
+    async def wait_for_stt() -> None:
+        if isinstance(stt, DeferredConnectDeepgramFluxSTTService):
+            await stt.wait_until_ready()
+        else:
+            # The blocking service emits on_connected only once its socket is open.
+            await stt_ready.wait()
+
+    stt_ready = asyncio.Event()
+
+    @stt.event_handler("on_connected")
+    async def _on_stt_connected(_service: Any) -> None:
+        stt_ready.set()
+
+    hooks.on_task(task, wait_for_stt)
 
     runner = PipelineRunner(handle_sigint=False)
     log.info("Pipeline runner starting", stream_sid=stream_sid)
@@ -814,7 +760,7 @@ async def run_pipeline(
         return PipelineExecutionResult(completed=True)
     except asyncio.CancelledError:
         log.info("Pipeline runner cancelled (user disconnected)")
-        return PipelineExecutionResult(completed=True, error="User disconnected", disconnected=True)
+        return PipelineExecutionResult(completed=True, disconnected=True)
     except Exception as exc:
         log.error("Pipeline runner failed: {error}", error=str(exc))
         return PipelineExecutionResult(completed=False, error=str(exc))

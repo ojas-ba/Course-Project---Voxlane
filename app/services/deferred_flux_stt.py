@@ -1,4 +1,4 @@
-"""Deepgram Flux STT that connects in the background, so the greeting isn't blocked.
+"""Deepgram Flux STT that connects in the background, so transport startup can proceed while the provider connects.
 
 Root cause (verified in the installed package): ``DeepgramFluxSTTBase.start()``
 ends with ``await self._connect()``, and ``STTService.process_frame`` only pushes
@@ -44,6 +44,14 @@ class DeferredConnectDeepgramFluxSTTService(DeepgramFluxSTTService):
         self.connected_at: float | None = None
         self.connect_failed_at: float | None = None
         self.connect_cancelled_at: float | None = None
+        self._connection_ready = asyncio.Event()
+        self._connection_error: str | None = None
+
+    async def wait_until_ready(self) -> None:
+        """Wait for the provider socket or report its startup failure."""
+        await self._connection_ready.wait()
+        if self._connection_error is not None:
+            raise RuntimeError(self._connection_error)
 
     async def start(self, frame: StartFrame) -> None:
         # Invoke DeepgramFluxSTTBase.start's *setup* without its trailing blocking
@@ -69,7 +77,10 @@ class DeferredConnectDeepgramFluxSTTService(DeepgramFluxSTTService):
     async def _background_connect(self) -> None:
         try:
             await self._connect()
+            if not self._transport_is_active():
+                raise RuntimeError("Deepgram connection did not become active")
             self.connected_at = time.time()
+            self._connection_ready.set()
             elapsed_ms = round((self.connected_at - (self.connect_started_at or self.connected_at)) * 1000.0, 1)
             logger.info(
                 "Deferred Flux STT connect completed (ready for audio)", connect_ms=elapsed_ms
@@ -77,10 +88,14 @@ class DeferredConnectDeepgramFluxSTTService(DeepgramFluxSTTService):
         except asyncio.CancelledError:
             # Intentional shutdown — do NOT surface an ErrorFrame.
             self.connect_cancelled_at = time.time()
+            self._connection_error = "Speech recognition startup canceled"
+            self._connection_ready.set()
             logger.info("Deferred Flux STT connect cancelled during shutdown")
             raise
         except Exception as exc:  # a real connect failure must surface clearly
             self.connect_failed_at = time.time()
+            self._connection_error = "Speech recognition startup failed"
+            self._connection_ready.set()
             logger.error("Deferred Flux STT connect failed: {err}", err=str(exc))
             await self.push_error_frame(ErrorFrame(f"Deepgram Flux STT connect failed: {exc}"))
 

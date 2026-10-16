@@ -29,3 +29,8 @@ Thumbs.db
 
 # Claude Code local runtime/settings
 .claude/
+
+# Local browser demo data and generated assets
+data/
+frontend/node_modules/
+app/static/*.js

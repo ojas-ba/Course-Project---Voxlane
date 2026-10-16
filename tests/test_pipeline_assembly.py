@@ -31,7 +31,7 @@ def test_snapshot_exposes_stt_and_llm_config():
     snap = build_config_snapshot(get_settings())
     assert _stt_cfg(snap)["model"] == "flux-general-multi"
     assert _stt_cfg(snap)["language_hints"] == ["en", "hi"]
-    assert _llm_cfg(snap)["model"] == "gpt-oss-120b"
+    assert _llm_cfg(snap)["model"] == "qwen-3.8-27b"
 
 
 def test_build_stt_and_llm_construct():
@@ -171,68 +171,6 @@ def test_stt_ready_state_is_tri_state_not_a_latch():
     assert _stt_ready_state(non_deferred, 200.0) is True
 
 
-def test_greeting_settle_delay_default_is_500():
-    assert get_settings().greeting_settle_delay_ms == 500
-
-
-def test_opening_greeting_fires_on_client_connected_autonomously():
-    # The greeting must play on carrier-connect, exactly once, WITHOUT waiting for
-    # the caller to speak. Speaking before connect lets the carrier drop the audio.
-    import asyncio
-
-    from loguru import logger
-    from pipecat.frames.frames import TTSSpeakFrame
-
-    from app.runtime import ACTIVE_SESSIONS
-    from app.services.pipecat_pipeline import _schedule_opening_greeting
-
-    call_sid = "c_greet"
-    ACTIVE_SESSIONS[call_sid] = {
-        "call_sid": call_sid, "stream_sid": "s", "metrics": {}, "transcript": [],
-        "first_latency": None, "config_snapshot": {}, "memory": {}, "language_state": {},
-    }
-
-    class _FakeTransport:
-        def __init__(self):
-            self.handlers = {}
-
-        def event_handler(self, name):
-            def deco(fn):
-                self.handlers[name] = fn
-                return fn
-            return deco
-
-    class _FakeTask:
-        def __init__(self):
-            self.frames = []
-
-        async def queue_frame(self, frame):
-            self.frames.append(frame)
-
-    transport = _FakeTransport()
-    task = _FakeTask()
-    try:
-        async def run():
-            state = _schedule_opening_greeting(
-                transport=transport, task=task, log=logger,
-                call_sid=call_sid, greeting_text="Hi there!", settle_ms=0,
-            )
-            assert "on_client_connected" in transport.handlers
-            # No caller speech — connecting alone triggers the greeting.
-            await transport.handlers["on_client_connected"](transport, object())
-            await state["task"]
-            # A re-fired connect must NOT speak the greeting twice.
-            await transport.handlers["on_client_connected"](transport, object())
-            return state
-
-        asyncio.run(run())
-        assert len(task.frames) == 1
-        assert isinstance(task.frames[0], TTSSpeakFrame)
-        assert task.frames[0].text == "Hi there!"
-    finally:
-        ACTIVE_SESSIONS.pop(call_sid, None)
-
-
 def test_user_muted_until_first_bot_complete_during_greeting():
     # Greeting-phase safety (makes deferred STT safe): the caller is muted until
     # the opening greeting completes, so early audio can't create a turn.
@@ -256,25 +194,10 @@ def test_enable_speculative_llm_defaults_false():
     assert LLMCfg().enable_speculative_llm is False
 
 
-def test_speculative_llm_requires_eager_eot_cross_field():
-    # Speculation is triggered by Flux EagerEndOfTurn events; enabling it without
-    # stt.enable_eager_eot would be silently inert, so the top-level RuntimeConfig
-    # validator rejects that combination loudly (the /config save fails).
-    with pytest.raises(ValidationError):
-        RuntimeConfig(
-            llm=LLMCfg(enable_speculative_llm=True),
-            stt=STTCfg(enable_eager_eot=False),
-        )
-    # Speculation on + eager on (valid eager config) -> accepted.
-    RuntimeConfig(
-        llm=LLMCfg(enable_speculative_llm=True),
-        stt=STTCfg(enable_eager_eot=True, eager_eot_threshold=0.6, eot_threshold=0.7),
-    )
-    # Speculation off -> validator is a no-op even with eager off (existing configs).
-    RuntimeConfig(
-        llm=LLMCfg(enable_speculative_llm=False),
-        stt=STTCfg(enable_eager_eot=False),
-    )
+def test_browser_rejects_speculation_even_with_eager():
+    with pytest.raises(ValidationError, match="disabled"):
+        RuntimeConfig(stt={"enable_eager_eot": True, "eager_eot_threshold": 0.6},
+                      llm={"enable_speculative_llm": True})
 
 
 def test_pipeline_byte_identical_when_speculation_disabled():

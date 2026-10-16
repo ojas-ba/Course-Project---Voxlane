@@ -104,7 +104,7 @@ def test_finalize_call_log_accepts_v3_snapshot():
         error=None,
     )
 
-    assert call_log.config_snapshot["snapshot_version"] == "v3"
+    assert call_log.config_snapshot["snapshot_version"] == "browser-v1"
     assert call_log.config_snapshot["runtime_config"]["llm"]["provider"] == "cerebras"
     assert call_log.conversation_outcome == "completed"
 

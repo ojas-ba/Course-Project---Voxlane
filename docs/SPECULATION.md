@@ -1,3 +1,5 @@
+> Status: retained experimental code; eager/speculative settings are disabled in the browser prototype. See [ADR-006](decisions/ADR_006_BROWSER_LOCAL_FILES.md).
+
 # Speculative LLM
 
 A two-stage, **default-OFF** latency optimization that hides the endpointing tail by drafting the reply

@@ -1,77 +1,64 @@
-"""Application entrypoint for the local voice agent."""
+"""Local browser voice agent application."""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI
-from loguru import logger
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import RequestResponseEndpoint
+from starlette.responses import Response
 
 from app.config import get_settings
-from app.database import close_database, init_database
 from app.logging_config import setup_logging
+from app.routers.browser import router as browser_router
 from app.routers.dashboard import router as dashboard_router
-from app.routers.telephony import router as telephony_router
-from app.services.exotel_client import ExotelOutboundClient
-from app.services.runtime_config import seed_runtime_config_if_missing
+from app.services.browser_session import BrowserSessionManager
+from app.services.runtime_config import close_runtime_config, seed_runtime_config_if_missing
 from app.services.warmup import run_local_warmup
+
+STATIC_DIR = Path(__file__).resolve().parent / "app" / "static"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan manager for startup and shutdown resources."""
-
-    # Initialize logging first so all subsequent startup logs are structured
+    """Initialize local resources; provider sockets are opened only per conversation."""
     setup_logging()
-
-    # Initialize database client. MongoDB is REQUIRED in V3 — fail clearly if
-    # it is unavailable rather than serving calls with no runtime config.
     settings = get_settings()
-    await init_database(settings)
-
-    # Seed/load the single global runtime config into the process cache.
+    for asset in ("demo.js", "htmx.min.js"):
+        if not (STATIC_DIR / asset).is_file():
+            raise RuntimeError("Browser assets missing. Run npm --prefix frontend ci and npm --prefix frontend run build")
+    config = await seed_runtime_config_if_missing(settings)
+    setup_logging(log_level=config.ops.debug_log_level)
+    await run_local_warmup(settings)
+    manager = BrowserSessionManager(settings)
+    app.state.browser_sessions = manager
     try:
-        await seed_runtime_config_if_missing(settings)
-    except Exception:
-        logger.exception("Failed to seed/load runtime config at startup")
-
-    # Warm local cold-start components (Silero VAD, audio stack) so the first
-    # call's greeting is fast. Local only — no provider sockets/billing.
-    try:
-        await run_local_warmup(settings)
-    except Exception:
-        logger.exception("Local warmup failed (continuing; first call may be slower)")
-
-    # Initialize Exotel outbound client (optional — server starts without it)
-    try:
-        exotel_client = ExotelOutboundClient(settings)
-        app.state.exotel_client = exotel_client
-        logger.info("Exotel outbound client attached to app.state")
-    except ValueError as exc:
-        app.state.exotel_client = None
-        logger.warning(
-            "Exotel outbound client not initialized (inbound-only mode): {err}",
-            err=str(exc),
-        )
-
-    yield
-
-    # Shutdown
-    exotel_client = getattr(app.state, "exotel_client", None)
-    if exotel_client is not None:
-        await exotel_client.close()
-    await close_database()
+        yield
+    finally:
+        await manager.close()
+        await close_runtime_config()
 
 
 def create_app() -> FastAPI:
-    """Create the FastAPI application instance for local development."""
+    """Create the single-user, same-origin FastAPI application."""
+    app = FastAPI(title="Browser Voice Agent", version="0.2.0", lifespan=lifespan)
 
-    app = FastAPI(
-        title="VoiceAgent Pipecat",
-        version="0.1.0",
-        lifespan=lifespan,
-    )
-    app.include_router(telephony_router)
+    @app.middleware("http")
+    async def same_origin(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """Reject browser mutations from another origin without introducing CORS."""
+        origin = request.headers.get("origin")
+        if request.method in {"POST", "PATCH", "PUT", "DELETE"} and origin:
+            parsed = urlsplit(origin)
+            if parsed.scheme != request.url.scheme or parsed.netloc != request.headers.get("host"):
+                return JSONResponse({"detail": "Use the application's own browser page"}, status_code=403)
+        return await call_next(request)
+
+    app.include_router(browser_router)
     app.include_router(dashboard_router)
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR), check_dir=False), name="static")
     return app
 
 

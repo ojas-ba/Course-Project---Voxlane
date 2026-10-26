@@ -11,9 +11,12 @@ The application is a single-user local browser voice agent with SmallWebRTC and 
 | [MEMORY](MEMORY.md) | Recent window, facts, summary, and lexical recall. |
 | [RUNBOOK](RUNBOOK.md) | Setup, checks, and human browser validation. |
 | [Implementation plan](BROWSER_IMPLEMENTATION_PLAN.md) | Reviewed conversion plan and acceptance boundaries. |
+| [Repair plan](BROWSER_REPAIR_PLAN.md) | Implemented pipeline repairs and remaining human validation. |
+| [Debugging review](BROWSER_DEBUG_REVIEW.md) | Evidence behind the repairs. |
+| [English conversation review](ENGLISH_CONVERSATION_REVIEW.md) | Chat evidence, current research, and focused quality improvements. |
 | [ADR-006](decisions/ADR_006_BROWSER_LOCAL_FILES.md) | Accepted replacement of Exotel/Mongo with browser/local JSON. |
 | [Decisions](decisions/) | Historical decisions; ADR-006 supersedes telephone/storage assumptions. |
-| [SPECULATION](SPECULATION.md) | Existing experimental implementation, disabled in browser configuration. |
+| [SPECULATION](SPECULATION.md) | Optional eager telemetry and speculative LLM drafts. |
 | [TELEPHONY](TELEPHONY.md) | Retirement notice for the old telephone path. |
 
 Start with the root [README](../README.md) to run locally.

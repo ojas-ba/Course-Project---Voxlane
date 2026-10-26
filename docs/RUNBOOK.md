@@ -17,6 +17,8 @@ the application needs no phone service, database, or tunnel.
 
 `python -m pytest -m "not live"`
 
+`npm --prefix frontend test`
+
 `npm --prefix frontend run build`
 
 The suite covers local file storage, request/route contracts, provider request payloads,
@@ -42,8 +44,15 @@ Do not run them implicitly as part of normal verification.
 - Microphone denied: allow permission for localhost, then retry. Check the selected OS microphone.
 - No playback: click Enable audio and check the browser/OS speaker output. Use headphones for echo.
 - Setup timeout/provider error: check credentials, quota, model/voice access, and structured logs.
-- Save failure: inspect disk permissions/space. Cleanup still runs; a failed save has no history link.
-- Cleanup cannot stop a runner: restart Python before starting another conversation.
+- Save failure: inspect disk permissions/space, then click Retry saving. The finalized payload stays
+  in server memory until saved; keep Python open while retrying. The button uses the same End endpoint.
+- End takes longer: cleanup continues and blocks a new call until the runner actually exits.
+  Retry saving joins that cleanup. A permanently stuck runner requires a restart, which may lose its active data.
+- Protocol mismatch: run `npm --prefix frontend ci` and rebuild. The build rejects clients outside
+  RTVI 1.3.0; do not override the advertised protocol version.
+- Input sounds wrong: the Talk page names the selected microphone, and structured logs include its
+  actual sample rate, channel count, and echo/noise/gain settings. Compare headphones and speakers,
+  English/Hindi, and deliberate pauses. Browser native rates may differ from the fixed 16 kHz pipeline.
 - Config typo: correct `data/runtime_config.json` and restart. Existing files are never silently reset.
 
 Normal data is under `data/`, logs under `logs/`. Both are ignored by Git.

@@ -69,18 +69,18 @@ def test_pipeline_order_has_prefix_between_llm_and_tts():
         stream_sid="s1",
         metrics_observer=obs,
     )
-    # input, stt, stt_hint, memory, user(), llm, prefix, tts, output(), assistant()
-    assert len(procs) == 10
-    assert isinstance(procs[1], DeepgramFluxSTTService)        # stt
-    assert isinstance(procs[2], SttLanguageHintProcessor)      # weak STT hint
-    assert isinstance(procs[3], MemoryProcessor)               # memory (before user())
-    assert isinstance(procs[5], CerebrasLLMService)            # llm
-    assert isinstance(procs[6], LanguagePrefixProcessor)       # prefix BETWEEN llm and tts
-    assert isinstance(procs[7], CartesiaTTSService)            # tts
+    # input, input_gate, stt, stt_hint, memory, user(), llm, prefix, tts, output(), assistant()
+    assert len(procs) == 11
+    assert isinstance(procs[2], DeepgramFluxSTTService)
+    assert isinstance(procs[3], SttLanguageHintProcessor)
+    assert isinstance(procs[4], MemoryProcessor)
+    assert isinstance(procs[6], CerebrasLLMService)
+    assert isinstance(procs[7], LanguagePrefixProcessor)
+    assert isinstance(procs[8], CartesiaTTSService)
     # user aggregator [4] distinct from assistant aggregator [9]; assistant is
     # AFTER transport.output() [8].
-    assert procs[4] is not procs[9]
-    assert procs[8] is transport.output.return_value
+    assert procs[5] is not procs[10]
+    assert procs[9] is transport.output.return_value
 
 
 def test_turn_stop_timeout_default_is_500_and_range_enforced():
@@ -142,7 +142,7 @@ def test_aggregator_pair_threads_turn_stop_timeout_from_config():
         transport=transport, snapshot=snap, settings=settings,
         call_sid="c1", stream_sid="s1", metrics_observer=obs,
     )
-    user_agg = procs[4]
+    user_agg = procs[5]
     assert user_agg._params.user_turn_strategies.stop[0]._timeout == 0.2
 
 
@@ -194,10 +194,11 @@ def test_enable_speculative_llm_defaults_false():
     assert LLMCfg().enable_speculative_llm is False
 
 
-def test_browser_rejects_speculation_even_with_eager():
-    with pytest.raises(ValidationError, match="disabled"):
-        RuntimeConfig(stt={"enable_eager_eot": True, "eager_eot_threshold": 0.6},
-                      llm={"enable_speculative_llm": True})
+def test_browser_allows_speculation_with_eager():
+    assert RuntimeConfig(stt={"enable_eager_eot": True, "eager_eot_threshold": 0.6},
+                         llm={"enable_speculative_llm": True})
+    with pytest.raises(ValidationError, match="requires enable_eager_eot"):
+        RuntimeConfig(llm={"enable_speculative_llm": True})
 
 
 def test_pipeline_byte_identical_when_speculation_disabled():
@@ -218,9 +219,9 @@ def test_pipeline_byte_identical_when_speculation_disabled():
         stream_sid="s1",
         metrics_observer=obs,
     )
-    assert len(procs) == 10
-    assert isinstance(procs[5], CerebrasLLMService)        # llm still at baseline index
-    assert isinstance(procs[6], LanguagePrefixProcessor)   # prefix immediately after llm
+    assert len(procs) == 11
+    assert isinstance(procs[6], CerebrasLLMService)
+    assert isinstance(procs[7], LanguagePrefixProcessor)
 
 
 def test_pipeline_inserts_gate_between_user_agg_and_llm_when_enabled():
@@ -245,17 +246,16 @@ def test_pipeline_inserts_gate_between_user_agg_and_llm_when_enabled():
         stream_sid="s1",
         metrics_observer=obs,
     )
-    assert len(procs) == 11
-    assert isinstance(procs[4], type(procs[4]))                # user aggregator
-    assert isinstance(procs[5], SpecGateProcessor)             # gate between user-agg and llm
-    assert isinstance(procs[6], CerebrasLLMService)            # llm shifted to 6
-    assert isinstance(procs[7], LanguagePrefixProcessor)      # prefix shifted to 7
-    assert isinstance(procs[8], CartesiaTTSService)            # tts shifted to 8
-    assert procs[9] is transport.output.return_value
-    assert procs[4] is not procs[10]                           # distinct user/assistant aggregators
+    assert len(procs) == 12
+    assert isinstance(procs[6], SpecGateProcessor)
+    assert isinstance(procs[7], CerebrasLLMService)
+    assert isinstance(procs[8], LanguagePrefixProcessor)
+    assert isinstance(procs[9], CartesiaTTSService)
+    assert procs[10] is transport.output.return_value
+    assert procs[5] is not procs[11]
     # the gate is wired to a real controller
     from app.services.speculation_controller import SpeculationController
-    assert isinstance(procs[5]._controller, SpeculationController)
+    assert isinstance(procs[6]._controller, SpeculationController)
 
 
 def test_speculation_not_enabled_without_eager_even_if_llm_flag_set():
@@ -274,5 +274,5 @@ def test_speculation_not_enabled_without_eager_even_if_llm_flag_set():
         transport=transport, snapshot=snap, settings=settings,
         call_sid="c1", stream_sid="s1", metrics_observer=obs,
     )
-    assert len(procs) == 10                                    # no gate inserted
-    assert isinstance(procs[5], CerebrasLLMService)
+    assert len(procs) == 11
+    assert isinstance(procs[6], CerebrasLLMService)

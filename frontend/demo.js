@@ -5,6 +5,7 @@ const element = (id) => /** @type {HTMLElement} */ (document.getElementById(id))
 const startButton = /** @type {HTMLButtonElement} */ (element('start'));
 const muteButton = /** @type {HTMLButtonElement} */ (element('mute'));
 const endButton = /** @type {HTMLButtonElement} */ (element('end'));
+const retryButton = /** @type {HTMLButtonElement} */ (element('retry-save'));
 const audio = /** @type {HTMLAudioElement} */ (element('bot-audio'));
 const meter = /** @type {HTMLMeterElement} */ (element('mic-level'));
 const transcript = element('transcript');
@@ -19,8 +20,43 @@ let botSpeaking = false;
 let stopping = false;
 let assistantRow = null;
 let userDraft = null;
+let pendingSaveSid = null;
 
-function status(text) { element('status').textContent = text; }
+function syncMic() {
+  if (!client) return;
+  const enabled = !muted && !greeting && !botSpeaking && !stopping;
+  // Track gating is immediate even when a media manager changes devices asynchronously.
+  const track = client.tracks?.()?.local?.audio;
+  if (track) track.enabled = enabled;
+  try {
+    Promise.resolve(client.enableMic(enabled)).catch(() => error('Could not change microphone state.'));
+  } catch { error('Could not change microphone state.'); }
+}
+
+async function configureInput(active) {
+  const track = active.tracks?.()?.local?.audio;
+  if (!track?.applyConstraints) return;
+  const supported = navigator.mediaDevices?.getSupportedConstraints?.() || {};
+  const constraints = Object.fromEntries(['echoCancellation', 'noiseSuppression', 'autoGainControl']
+    .filter((name) => supported[name]).map((name) => [name, true]));
+  try { await track.applyConstraints(constraints); }
+  catch { console.warn('Microphone uses its available browser audio settings.'); }
+}
+
+function reportInput() {
+  const track = client?.tracks?.()?.local?.audio;
+  if (!track?.getSettings) return;
+  const settings = track.getSettings();
+  const data = Object.fromEntries(['sampleRate', 'channelCount', 'echoCancellation', 'noiseSuppression', 'autoGainControl']
+    .filter((name) => settings[name] !== undefined).map((name) => [name, settings[name]]));
+  client.sendClientMessage('audio-diagnostics', { ...data, label: (track.label || '').slice(0, 120) });
+  element('input-device').textContent = `Microphone: ${track.label || 'browser default'}`;
+}
+
+function status(text, state = 'idle') {
+  element('status').textContent = text;
+  element('conversation').setAttribute('data-state', state);
+}
 function error(text) {
   element('error').textContent = text;
   element('error').hidden = !text;
@@ -29,10 +65,11 @@ function error(text) {
 function row(role, text, draft = false) {
   element('empty')?.remove();
   const container = document.createElement('div');
-  container.className = `utterance${draft ? ' draft' : ''}`;
+  container.className = `utterance utterance--${role === 'You' ? 'user' : 'agent'}${draft ? ' draft' : ''}`;
   const label = document.createElement('strong');
   label.textContent = role;
   const body = document.createElement('span');
+  body.setAttribute('dir', 'auto');
   body.textContent = text;
   container.append(label, body);
   transcript.append(container);
@@ -50,16 +87,17 @@ async function playbackReady() {
     uiReady = true;
     element('audio-enable').hidden = true;
     client.sendClientMessage('ui-ready', {});
-    status('Preparing your greeting…');
+    reportInput();
+    status('Preparing your greeting…', 'preparing');
   } catch {
     if (client !== active || generation !== current || stopping) return;
     element('audio-enable').hidden = false;
-    status('Click Enable audio to hear the agent.');
+    status('Click Enable audio to hear the agent.', 'attention');
   }
 }
 
 function resetControls() {
-  startButton.disabled = false;
+  startButton.disabled = Boolean(pendingSaveSid);
   muteButton.disabled = true;
   endButton.disabled = true;
   meter.value = 0;
@@ -68,27 +106,34 @@ function resetControls() {
   audio.srcObject = null;
 }
 
+async function saveConversation(sid) {
+  pendingSaveSid = sid;
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/end`, {
+    method: 'POST', signal: AbortSignal.timeout(65000),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.detail || 'Could not confirm cleanup.');
+  if (result.saved && result.history_url) {
+    const link = /** @type {HTMLAnchorElement} */ (element('history-link'));
+    link.href = result.history_url;
+    element('history').hidden = false;
+    pendingSaveSid = null;
+  }
+  if (result.error) error(result.error);
+  return result.saved;
+}
+
 async function stop() {
   if (stopping || !client) return;
   stopping = true;
   const active = client;
-  active.enableMic(false);
+  syncMic();
   endButton.disabled = true;
   muteButton.disabled = true;
-  status('Ending and saving…');
+  status('Ending and saving…', 'saving');
   try {
     if (callSid) {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(callSid)}/end`, {
-        method: 'POST', signal: AbortSignal.timeout(45000),
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.detail || 'Could not confirm cleanup.');
-      if (result.saved && result.history_url) {
-        const link = /** @type {HTMLAnchorElement} */ (element('history-link'));
-        link.href = result.history_url;
-        element('history').hidden = false;
-      }
-      if (result.error) error(result.error);
+      await saveConversation(callSid);
     }
   } catch (cause) {
     error(cause.message || 'Could not confirm whether the conversation was saved.');
@@ -98,13 +143,15 @@ async function stop() {
     await active.disconnect().catch(() => {});
     resetControls();
     stopping = false;
-    status('Conversation ended.');
+    retryButton.hidden = !pendingSaveSid;
+    status(pendingSaveSid ? 'Conversation saving is not confirmed. Click Retry saving.' : 'Conversation ended.',
+      pendingSaveSid ? 'attention' : 'idle');
   }
 }
 
 startButton.addEventListener('click', async () => {
   const current = ++generation;
-  const valid = () => current === generation;
+  const valid = () => current === generation && !stopping;
   startButton.disabled = true;
   error('');
   element('history').hidden = true;
@@ -116,7 +163,7 @@ startButton.addEventListener('click', async () => {
   assistantRow = userDraft = null;
   muteButton.textContent = 'Mute';
   muteButton.setAttribute('aria-pressed', 'false');
-  status('Allow microphone access to connect…');
+  status('Allow microphone access to connect…', 'connecting');
   let active;
   try {
     active = new PipecatClient({
@@ -146,7 +193,8 @@ startButton.addEventListener('click', async () => {
         onBotStartedSpeaking: () => {
           if (!valid()) return;
           botSpeaking = true;
-          status('Agent speaking…');
+          syncMic();
+          status('Agent speaking…', 'speaking');
         },
         onBotStoppedSpeaking: () => {
           if (!valid() || !botSpeaking) return;
@@ -154,9 +202,9 @@ startButton.addEventListener('click', async () => {
           assistantRow = null;
           if (greeting) {
             greeting = false;
-            active.enableMic(!muted);
           }
-          status(muted ? 'Microphone muted.' : 'Listening…');
+          syncMic();
+          status(muted ? 'Microphone muted.' : 'Listening…', muted ? 'idle' : 'listening');
         },
         onBotTtsText: (data) => {
           if (!valid() || !data.text) return;
@@ -165,20 +213,20 @@ startButton.addEventListener('click', async () => {
           transcript.scrollTop = transcript.scrollHeight;
         },
         onUserTranscript: (data) => {
-          if (!valid() || greeting || !data.text) return;
+          if (!valid() || greeting || muted || botSpeaking || !data.text) return;
           if (!userDraft) userDraft = row('You', '', true);
           userDraft.textContent = data.text;
           if (data.final) {
             userDraft.parentElement.classList.remove('draft');
             userDraft = null;
             assistantRow = null;
-            status('Thinking…');
+            status('Thinking…', 'preparing');
           }
         },
-        onBotLlmStarted: () => { if (valid()) status('Thinking…'); },
+        onBotLlmStarted: () => { if (valid()) status('Thinking…', 'preparing'); },
         onError: (event) => {
           if (!valid()) return;
-          error(event.error || event.message || 'The agent reported a provider error.');
+          error(event.data?.error || event.error || event.message || 'The agent reported a provider error.');
           void stop();
         },
         onDisconnected: () => { if (valid() && !stopping) void stop(); },
@@ -187,16 +235,18 @@ startButton.addEventListener('click', async () => {
   } catch (cause) {
     error(cause.message || 'This browser could not initialize audio.');
     resetControls();
-    status('Could not initialize audio.');
+    status('Could not initialize audio.', 'error');
     return;
   }
   client = active;
   try {
     await active.initDevices();
     if (!valid()) return;
-    active.enableMic(false);
+    syncMic();
+    await configureInput(active);
+    if (!valid()) return;
     endButton.disabled = false; // Allows canceling a connection before a session ID arrives.
-    status('Connecting…');
+    status('Connecting…', 'connecting');
     await active.connect({ webrtcRequestParams: { endpoint: '/api/offer' } });
   } catch (cause) {
     if (!valid()) return;
@@ -207,12 +257,29 @@ startButton.addEventListener('click', async () => {
 
 muteButton.addEventListener('click', () => {
   muted = !muted;
-  client?.enableMic(!muted && !greeting);
+  syncMic();
   muteButton.textContent = muted ? 'Unmute' : 'Mute';
   muteButton.setAttribute('aria-pressed', String(muted));
-  if (!botSpeaking && !greeting) status(muted ? 'Microphone muted.' : 'Listening…');
+  if (!botSpeaking && !greeting) status(muted ? 'Microphone muted.' : 'Listening…', muted ? 'idle' : 'listening');
 });
 endButton.addEventListener('click', () => void stop());
+retryButton.addEventListener('click', async () => {
+  if (!pendingSaveSid || retryButton.disabled) return;
+  retryButton.disabled = true;
+  error('');
+  status('Checking and saving…', 'saving');
+  try {
+    await saveConversation(pendingSaveSid);
+  } catch (cause) {
+    error(cause.message || 'Saving is not confirmed. Retry shortly.');
+  } finally {
+    retryButton.disabled = false;
+    retryButton.hidden = !pendingSaveSid;
+    startButton.disabled = Boolean(pendingSaveSid);
+    status(pendingSaveSid ? 'Saving is not confirmed. Retry shortly.' : 'Conversation saved.',
+      pendingSaveSid ? 'attention' : 'saved');
+  }
+});
 element('audio-enable').addEventListener('click', () => void playbackReady());
 window.addEventListener('pagehide', () => {
   client?.enableMic(false);

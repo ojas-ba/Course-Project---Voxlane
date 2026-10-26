@@ -1,4 +1,5 @@
-> Status: retained experimental code; eager/speculative settings are disabled in the browser prototype. See [ADR-006](decisions/ADR_006_BROWSER_LOCAL_FILES.md).
+> Status: available in browser Settings. New-installation defaults are off; the repaired local
+> setup enables both stages. See [configuration](CONFIGURATION.md).
 
 # Speculative LLM
 

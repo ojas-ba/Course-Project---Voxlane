@@ -422,6 +422,8 @@ class SpeculationController:
                 aclose = getattr(agen, "aclose", None)
                 if aclose is not None:
                     await aclose()
+            if not buf:
+                raise RuntimeError("Draft completed without final-answer text")
             # normal completion -> end the live stream for a draining gate
             queue.put_nowait(self._SENTINEL)
         except asyncio.CancelledError:
@@ -573,7 +575,9 @@ def make_cerebras_draft_factory(llm: Any) -> DraftStreamFactory:
     TTFB/metrics/frame state.
     """
 
-    def _factory(messages: list[dict[str, Any]]) -> Awaitable[AsyncIterator[Any]]:
+    def _factory(messages: list[dict[str, Any]]) -> AsyncIterator[Any] | Awaitable[AsyncIterator[Any]]:
+        if hasattr(llm, "stream_draft"):
+            return llm.stream_draft(messages)
         async def _open() -> AsyncIterator[Any]:
             ctx = LLMContext(messages=messages)
             adapter = llm.get_llm_adapter()

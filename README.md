@@ -2,7 +2,7 @@
 
 A single-user English/Hindi voice agent in your browser. FastAPI runs Pipecat locally;
 SmallWebRTC carries microphone audio, speech playback, and UI events.
-Deepgram Flux, Cerebras Qwen, and Cartesia remain server-side providers.
+Deepgram Flux, Cerebras Qwen 3.8 27B with reasoning disabled, and Cartesia remain server-side providers.
 
 No Exotel account, phone call, public tunnel, React server, or MongoDB is needed.
 
@@ -24,7 +24,8 @@ Use Python 3.11+ and Node 22.14+ for the initial browser build. Node is not need
 6. Open [Talk](http://localhost:8000), click Start, allow the microphone, and enable audio if prompted.
 
 The agent listens after the greeting and between replies. Headphones help avoid echo.
-End waits for cleanup and reports whether the conversation was saved.
+End waits for cleanup and reports whether the conversation was saved. If saving takes longer
+or a write fails, use Retry saving; cleanup continues while the server stays open.
 
 ## Local files
 

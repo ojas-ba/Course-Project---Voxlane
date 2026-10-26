@@ -11,7 +11,10 @@ class Element {
     this.children = [];
     this.hidden = false;
     this.textContent = '';
-    this.classList = { remove() {} };
+    this.className = '';
+    this.classList = {
+      remove: (...tokens) => { this.className = this.className.split(' ').filter((token) => !tokens.includes(token)).join(' '); },
+    };
   }
   addEventListener(name, fn) { this.handlers[name] = fn; }
   append(...elements) { for (const e of elements) { e.parentElement = this; this.children.push(e); } }
@@ -25,7 +28,7 @@ class Element {
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 async function page({ denied = false } = {}) {
-  const ids = ['start', 'mute', 'end', 'bot-audio', 'mic-level', 'transcript', 'status', 'error', 'empty', 'audio-enable', 'history', 'history-link'];
+  const ids = ['conversation', 'start', 'mute', 'end', 'bot-audio', 'mic-level', 'transcript', 'status', 'error', 'empty', 'audio-enable', 'history', 'history-link', 'retry-save', 'input-device'];
   const elements = Object.fromEntries(ids.map((id) => [id, new Element()]));
   globalThis.document = { getElementById: (id) => elements[id], createElement: () => new Element() };
   globalThis.window = { addEventListener() {} };
@@ -61,8 +64,9 @@ test('input stays muted until greeting completion and readiness is sent once', a
   assert.deepEqual(client().sent, ['ui-ready']);
   client().callbacks.onBotStartedSpeaking();
   client().callbacks.onBotStoppedSpeaking();
-  assert.deepEqual(client().micChanges, [false, true]);
+  assert.deepEqual(client().micChanges, [false, false, true]);
   assert.equal(elements.status.textContent, 'Listening…');
+  assert.equal(elements.conversation['data-state'], 'listening');
 });
 
 test('mute chosen during greeting is respected after speech', async () => {
@@ -82,6 +86,7 @@ test('blocked playback provides an explicit recovery action before greeting', as
   await settle();
   assert.deepEqual(client().sent, []);
   assert.equal(elements['audio-enable'].hidden, false);
+  assert.equal(elements.conversation['data-state'], 'attention');
   elements['bot-audio'].play = () => Promise.resolve();
   elements['audio-enable'].handlers.click();
   await settle();
@@ -122,4 +127,95 @@ test('overlapping playback callbacks send readiness only once', async () => {
   for (const resolve of pending) resolve();
   await settle();
   assert.deepEqual(client().sent, ['ui-ready']);
+});
+
+test('every bot reply mutes input and manual mute survives the speaking callbacks', async () => {
+  const { elements, client } = await page();
+  await elements.start.handlers.click();
+  client().callbacks.onBotStartedSpeaking();
+  client().callbacks.onBotStoppedSpeaking();
+  assert.equal(client().micChanges.at(-1), true);
+  client().callbacks.onBotStartedSpeaking();
+  assert.equal(client().micChanges.at(-1), false);
+  assert.equal(elements.conversation['data-state'], 'speaking');
+  elements.mute.handlers.click();
+  client().callbacks.onBotStoppedSpeaking();
+  assert.equal(client().micChanges.at(-1), false);
+  assert.equal(elements.status.textContent, 'Microphone muted.');
+  assert.equal(elements.conversation['data-state'], 'idle');
+});
+
+test('failed save stays visible and retry uses the original call without another connection', async () => {
+  const { elements, client } = await page();
+  const urls = [];
+  let attempt = 0;
+  globalThis.fetch = async (url) => {
+    urls.push(url);
+    return { ok: true, json: async () => ++attempt === 1
+      ? { saved: false, error: 'Conversation is still ending. Retry saving shortly.' }
+      : { saved: true, history_url: '/calls/saved' } };
+  };
+  await elements.start.handlers.click();
+  elements.end.handlers.click();
+  await settle();
+  assert.equal(elements['retry-save'].hidden, false);
+  assert.equal(elements.start.disabled, true);
+  assert.match(elements.status.textContent, /not confirmed/);
+  assert.equal(elements.conversation['data-state'], 'attention');
+  assert.equal(client().disconnected, true);
+  await elements['retry-save'].handlers.click();
+  assert.deepEqual(urls, [urls[0], urls[0]]);
+  assert.equal(elements.history.hidden, false);
+  assert.equal(elements.start.disabled, false);
+  assert.equal(elements['retry-save'].hidden, true);
+  assert.equal(elements.status.textContent, 'Conversation saved.');
+  assert.equal(elements.conversation['data-state'], 'saved');
+});
+
+test('message styling keeps streaming and finalized transcripts in their original nodes', async () => {
+  const { elements, client } = await page();
+  await elements.start.handlers.click();
+  await settle();
+  const callbacks = client().callbacks;
+  callbacks.onBotStartedSpeaking();
+  callbacks.onBotTtsText({ text: 'नमस्ते!' });
+  const agent = elements.transcript.children[0];
+  const agentBody = agent.children[1];
+  callbacks.onBotTtsText({ text: 'How can I help?' });
+  assert.equal(elements.transcript.children.length, 1);
+  assert.equal(agent.children[0].textContent, 'Agent');
+  assert.match(agent.className, /utterance--agent/);
+  assert.equal(agent.children[1], agentBody);
+  assert.equal(agentBody.textContent, 'नमस्ते! How can I help?');
+  assert.equal(agentBody.dir, 'auto');
+  callbacks.onBotStoppedSpeaking();
+
+  callbacks.onUserTranscript({ text: 'मुझे', final: false });
+  const user = elements.transcript.children[1];
+  const userBody = user.children[1];
+  assert.match(user.className, /utterance--user.*draft/);
+  callbacks.onUserTranscript({ text: 'मुझे help चाहिए।', final: false });
+  callbacks.onUserTranscript({ text: 'मुझे help चाहिए। <script>plain text</script>', final: true });
+  assert.equal(elements.transcript.children.length, 2);
+  assert.equal(user.children[0].textContent, 'You');
+  assert.equal(user.children[1], userBody);
+  assert.equal(userBody.textContent, 'मुझे help चाहिए। <script>plain text</script>');
+  assert.doesNotMatch(user.className, /\bdraft\b/);
+  assert.equal(elements.conversation['data-state'], 'preparing');
+
+  callbacks.onBotTtsText({ text: 'ज़रूर।' });
+  assert.equal(elements.transcript.children.length, 3);
+  assert.equal(elements.transcript.children[0], agent);
+  assert.equal(elements.transcript.children[1], user);
+});
+
+test('a network failure preserves the save identifier and never reports a successful save', async () => {
+  const { elements } = await page();
+  globalThis.fetch = async () => { throw new Error('network failed'); };
+  await elements.start.handlers.click();
+  elements.end.handlers.click();
+  await settle();
+  assert.match(elements.error.textContent, /network failed/);
+  assert.equal(elements['retry-save'].hidden, false);
+  assert.match(elements.status.textContent, /not confirmed/);
 });

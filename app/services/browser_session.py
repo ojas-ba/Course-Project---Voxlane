@@ -15,9 +15,11 @@ from loguru import logger
 from pipecat.frames.frames import TTSSpeakFrame
 from pipecat.pipeline.task import PipelineTask
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
+from pydantic import ValidationError
 
 from app.config import Settings
-from app.models.browser_models import CandidateRequest, EndResult, OfferRequest
+from app.models.browser_models import AudioDiagnostics, CandidateRequest, EndResult, OfferRequest
+from app.models.schemas import CallLog
 from app.runtime import ConfigSnapshot, create_session, delete_session, get_session, update_session_metric
 from app.services.language import strip_language_prefix_tag
 from app.services.pipecat_pipeline import PipelineExecutionResult, PipelineHooks, _record_greeting, run_pipeline
@@ -68,6 +70,9 @@ class BrowserSessionManager:
         self._lock = asyncio.Lock()
         self._live: _LiveSession | None = None
         self._last_result: EndResult | None = None
+        self._pending_logs: dict[str, CallLog] = {}
+        self._save_lock = asyncio.Lock()
+        self._save_tasks: dict[str, asyncio.Task[EndResult]] = {}
         self._closing = False
         self._stuck = False
 
@@ -140,22 +145,30 @@ class BrowserSessionManager:
             raise HTTPException(422, "Invalid ICE candidate") from None
 
     async def end(self, call_sid: str) -> EndResult:
-        """Await the shared teardown, retaining a result for repeated End requests."""
+        """Join retained cleanup or retry a finalized log without finalizing twice."""
+        if call_sid in self._pending_logs:
+            return await self._save_finalized(call_sid)
         if self._last_result is not None and self._last_result.call_sid == call_sid:
             return self._last_result
         live = self._live
         if live is None or live.call_sid != call_sid:
             raise HTTPException(404, "Unknown conversation")
-        result = await asyncio.shield(self._request_stop(live, disconnected=True))
-        if self._stuck:
-            raise HTTPException(503, result.error)
-        return result
+        cleanup = self._request_stop(live, disconnected=True)
+        budget = live.snapshot["runtime_config"]["ops"]["shutdown_timeout_secs"]
+        try:
+            return await asyncio.wait_for(asyncio.shield(cleanup), timeout=budget)
+        except TimeoutError:
+            logger.warning("End wait expired; retained cleanup continues", call_sid=call_sid)
+            return EndResult(call_sid=call_sid, saved=False,
+                             error="Conversation is still ending. Retry saving shortly.")
 
     async def close(self) -> None:
         """Reject new starts and drain the active conversation on app shutdown."""
         self._closing = True
         if self._live is not None:
             await asyncio.shield(self._request_stop(self._live, error="Application stopped"))
+        for call_sid in list(self._pending_logs):
+            await self._save_finalized(call_sid)
 
     def _register_connection(self, live: _LiveSession) -> None:
         @live.connection.event_handler("closed")
@@ -217,6 +230,14 @@ class BrowserSessionManager:
         async def client_message(_rtvi: Any, message: Any) -> None:
             if message.type == "ui-ready":
                 live.ui_ready.set()
+            elif message.type == "audio-diagnostics":
+                try:
+                    data = AudioDiagnostics.model_validate(message.data)
+                except ValidationError:
+                    logger.warning("Invalid microphone diagnostics ignored", call_sid=live.call_sid)
+                else:
+                    logger.info("Browser microphone settings", call_sid=live.call_sid,
+                                capture=data.model_dump(exclude_none=True))
 
         live.greeting = asyncio.create_task(self._greet(live, stt_ready))
         live.attached.set()
@@ -261,6 +282,7 @@ class BrowserSessionManager:
         return live.cleanup
 
     async def _cleanup(self, live: _LiveSession) -> EndResult:
+        started = time.monotonic()
         # Let an already failed runner's setup caller report its own HTTP error.
         setup = live.setup
         if live.attached.is_set() and live.runner is not None and live.runner.done():
@@ -269,37 +291,31 @@ class BrowserSessionManager:
         for task in pending:
             task.cancel()
         if pending:
-            _, unresponsive = await asyncio.wait(pending, timeout=1)
-            if unresponsive:
-                self._stuck = True
-                try:
-                    await asyncio.wait_for(live.connection.disconnect(), timeout=2)
-                except Exception:
-                    logger.error("Unresponsive browser setup could not be closed", call_sid=live.call_sid)
-                return EndResult(call_sid=live.call_sid, saved=False, error="Setup cleanup failed; restart the application")
+            # HTTP callers may stop waiting, but ownership of these tasks is retained.
+            await asyncio.gather(*pending, return_exceptions=True)
+        logger.info("Browser setup drained", call_sid=live.call_sid,
+                    elapsed_ms=round((time.monotonic() - started) * 1000, 1))
         budget = live.snapshot["runtime_config"]["ops"]["shutdown_timeout_secs"]
         try:
-            async with asyncio.timeout(budget):
-                if live.task is not None and live.runner is not None and not live.runner.done():
-                    await live.task.cancel()
-                if live.runner is not None:
-                    await asyncio.shield(live.runner)
+            if live.task is not None and live.runner is not None and not live.runner.done():
+                await live.task.cancel()
+            if live.runner is not None:
+                await asyncio.wait_for(asyncio.shield(live.runner), timeout=budget)
         except (Exception, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError) and asyncio.current_task().cancelling():
+                raise  # Process shutdown must not finalize a still-running pipeline.
             if live.runner is not None and not live.runner.done():
+                logger.warning("Pipeline is slow to stop; waiting for cancellation cleanup",
+                               call_sid=live.call_sid)
                 live.runner.cancel()
-                await asyncio.wait([live.runner], timeout=1)
-            live.error = live.error or ("Pipeline shutdown timed out" if isinstance(exc, TimeoutError)
-                                        else "Pipeline cancellation failed")
-            live.disconnected = False
-        if live.runner is not None and not live.runner.done():
-            self._stuck = True
-            try:
-                await asyncio.wait_for(live.connection.disconnect(), timeout=2)
-            except Exception:
-                pass
-            return EndResult(call_sid=live.call_sid, saved=False, error="Cleanup failed; restart the application")
+                # Never abandon the finalizer just because a deadline elapsed.
+                await asyncio.gather(live.runner, return_exceptions=True)
+            if not isinstance(exc, (TimeoutError, asyncio.CancelledError)):
+                live.error = live.error or "Pipeline cancellation failed"
+                live.disconnected = False
+        logger.info("Browser runner drained", call_sid=live.call_sid,
+                    elapsed_ms=round((time.monotonic() - started) * 1000, 1))
 
-        saved = False
         try:
             session = get_session(live.call_sid)
             if session is not None:
@@ -310,21 +326,48 @@ class BrowserSessionManager:
                     transcript=session["transcript"], completed=live.error is None and (result is None or result.completed),
                     error=live.error, disconnected=live.disconnected and live.error is None,
                 )
-                await storage.persist_call_log(log)
-                saved = True
+                self._pending_logs[live.call_sid] = log
         except Exception:
-            logger.exception("Conversation save failed", call_sid=live.call_sid)
+            logger.exception("Conversation finalization failed", call_sid=live.call_sid)
         finally:
             try:
                 await asyncio.wait_for(live.connection.disconnect(), timeout=2)
             except Exception:
                 logger.warning("Peer cleanup failed", call_sid=live.call_sid)
                 self._stuck = True
-            delete_session(live.call_sid)
             if self._live is live:
                 self._live = None
-        result = EndResult(call_sid=live.call_sid, saved=saved,
-                           history_url=f"/calls/{live.call_sid}" if saved else None,
-                           error=live.error if saved else "Conversation could not be saved; check server logs")
-        self._last_result = result
-        return result
+        if live.call_sid not in self._pending_logs:
+            return EndResult(call_sid=live.call_sid, saved=False,
+                             error="Conversation could not be finalized; check server logs")
+        return await self._save_finalized(live.call_sid)
+
+    async def _save_finalized(self, call_sid: str) -> EndResult:
+        """Keep a write transaction alive if its HTTP caller is canceled."""
+        task = self._save_tasks.get(call_sid)
+        if task is None:
+            task = asyncio.create_task(self._write_finalized(call_sid))
+            self._save_tasks[call_sid] = task
+            task.add_done_callback(lambda _task: self._save_tasks.pop(call_sid, None))
+        return await asyncio.shield(task)
+
+    async def _write_finalized(self, call_sid: str) -> EndResult:
+        """Serialize write retries and retain failed payloads in memory until saved."""
+        async with self._save_lock:
+            log = self._pending_logs.get(call_sid)
+            if log is None:
+                if self._last_result is not None and self._last_result.call_sid == call_sid:
+                    return self._last_result
+                raise HTTPException(404, "Unknown conversation")
+            try:
+                await storage.persist_call_log(log)
+            except Exception:
+                logger.exception("Conversation save failed; payload retained for retry", call_sid=call_sid)
+                return EndResult(call_sid=call_sid, saved=False,
+                                 error="Conversation could not be saved. Retry saving before closing the server.")
+            del self._pending_logs[call_sid]
+            delete_session(call_sid)
+            self._last_result = EndResult(call_sid=call_sid, saved=True,
+                                          history_url=f"/calls/{call_sid}", error=log.error)
+            logger.info("Conversation saved", call_sid=call_sid)
+            return self._last_result

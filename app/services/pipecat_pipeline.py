@@ -81,6 +81,7 @@ from app.runtime import (
 from app.services import language as lang
 from app.services import memory as mem
 from app.services.call_metrics import TurnMetricsObserver
+from app.services.cerebras_service import VoiceCerebrasLLMService
 from app.services.deferred_flux_stt import DeferredConnectDeepgramFluxSTTService
 from app.services.language_prefix import LanguagePrefixProcessor
 from app.services.speculation_controller import (
@@ -89,6 +90,7 @@ from app.services.speculation_controller import (
     make_cerebras_draft_factory,
 )
 from app.services.turn_collector import TurnCollector, utc_now
+from app.services.user_input import UserInputGate
 
 MULTILINGUAL_FLUX_MODEL = "flux-general-multi"
 
@@ -161,19 +163,17 @@ def _build_llm(snapshot: ConfigSnapshot, settings: Settings) -> CerebrasLLMServi
     """Construct the streamed Cerebras LLM service from the runtime config."""
 
     cfg = _llm_cfg(snapshot)
-    # request_timeout_seconds is the real per-request timeout: OpenAI/Cerebras
-    # base uses it as ``retry_timeout_secs`` for ``chat.completions.create``.
-    # Passing it here makes the config field truthful for the in-call LLM (it was
-    # previously unwired, so the 5.0s base default silently applied). LLM-2.
-    return CerebrasLLMService(
+    # The wrapper enforces a total deadline, including streamed reads; the base
+    # retry_timeout_secs alone is inert when retry_on_timeout is false.
+    return VoiceCerebrasLLMService(
         api_key=settings.cerebras_api_key,
         settings=CerebrasLLMSettings(
             model=cfg.get("model", "qwen-3.8-27b"),
             temperature=cfg.get("temperature", 0.7),
-            max_completion_tokens=cfg.get("max_tokens", 160),
+            max_completion_tokens=cfg.get("max_tokens", 1024),
             extra={"reasoning_effort": cfg.get("reasoning_effort", "none")},
         ),
-        retry_timeout_secs=float(cfg.get("request_timeout_seconds", 10.0)),
+        request_timeout_seconds=float(cfg.get("request_timeout_seconds", 10.0)),
     )
 
 
@@ -267,14 +267,19 @@ class SttLanguageHintProcessor(FrameProcessor):
     call_sid + (clipped) transcript text + language; no secrets.
     """
 
-    def __init__(self, *, call_sid: str) -> None:
+    def __init__(self, *, call_sid: str, accept_turn: Callable[[], bool] | None = None) -> None:
         super().__init__()
         self._call_sid = call_sid
+        self._accept_turn = accept_turn or (lambda: True)
 
     async def process_frame(
         self, frame: Any, direction: FrameDirection = FrameDirection.DOWNSTREAM
     ) -> None:
         await super().process_frame(frame, direction)
+        if (direction == FrameDirection.DOWNSTREAM
+                and isinstance(frame, (InterimTranscriptionFrame, TranscriptionFrame))
+                and not self._accept_turn()):
+            return
         if direction == FrameDirection.DOWNSTREAM:
             self._observe_transcript(frame)
         await self.push_frame(frame, direction)
@@ -471,7 +476,16 @@ def _build_pipeline_processors(
         context,
         turn_stop_timeout_ms=int(_stt_cfg(snapshot).get("turn_stop_timeout_ms", 500)),
     )
-    stt_language_hint = SttLanguageHintProcessor(call_sid=call_sid)
+    input_gate = UserInputGate()
+    stt_language_hint = SttLanguageHintProcessor(call_sid=call_sid, accept_turn=lambda: input_gate.accepting_turn)
+
+    @aggregator_pair.user().event_handler("on_user_mute_started")
+    async def user_muted(_aggregator: Any) -> None:
+        input_gate.set_muted(True)
+
+    @aggregator_pair.user().event_handler("on_user_mute_stopped")
+    async def user_unmuted(_aggregator: Any) -> None:
+        input_gate.set_muted(False)
     memory_processor = MemoryProcessor(
         call_sid=call_sid,
         context=context,
@@ -540,6 +554,8 @@ def _build_pipeline_processors(
     if hasattr(stt, "event_handler"):
         @stt.event_handler("on_end_of_turn")
         async def _on_end_of_turn(service: Any, transcript: str) -> None:
+            if not input_gate.accepting_turn:
+                return
             now = time.time()
             # Snapshot + clear the eager probe up front so it is consumed on EVERY
             # EndOfTurn (even a no-commit one) and can never bleed into a later turn
@@ -594,6 +610,7 @@ def _build_pipeline_processors(
         # is configured, so this is inert with the flag off.
         @stt.event_handler("on_start_of_turn")
         async def _on_start_of_turn(service: Any, *args: Any) -> None:
+            input_gate.start_turn()
             eager_probe.clear()  # new turn boundary
             if spec_controller is not None:
                 await spec_controller.on_turn_start()
@@ -601,6 +618,8 @@ def _build_pipeline_processors(
 
         @stt.event_handler("on_eager_end_of_turn")
         async def _on_eager_end_of_turn(service: Any, *args: Any) -> None:
+            if not input_gate.accepting_turn:
+                return
             transcript = _normalize_transcript_text(str(args[0])) if args else ""
             eager_probe["eager_eot_seen"] = True
             eager_probe["eager_eot_at"] = time.time()
@@ -613,6 +632,8 @@ def _build_pipeline_processors(
 
         @stt.event_handler("on_turn_resumed")
         async def _on_turn_resumed(service: Any, *args: Any) -> None:
+            if not input_gate.accepting_turn:
+                return
             eager_probe["turn_resumed_seen"] = True
             eager_probe["turn_resumed_at"] = time.time()
             eager_probe["resumed_since_eager"] = True
@@ -623,6 +644,7 @@ def _build_pipeline_processors(
 
     return [
         transport.input(),
+        input_gate,
         stt,
         stt_language_hint,
         memory_processor,
@@ -734,7 +756,7 @@ async def run_pipeline(
     async def _on_client_disconnected(_transport: Any, _client: Any) -> None:
         hooks.on_disconnected()
 
-    stt = processors[1]
+    stt = next(processor for processor in processors if isinstance(processor, DeepgramFluxSTTService))
 
     async def wait_for_stt() -> None:
         if isinstance(stt, DeferredConnectDeepgramFluxSTTService):

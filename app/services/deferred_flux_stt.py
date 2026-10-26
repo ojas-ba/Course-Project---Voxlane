@@ -110,11 +110,11 @@ class DeferredConnectDeepgramFluxSTTService(DeepgramFluxSTTService):
         # The base safely drops audio while the socket isn't open, but silently.
         # Log once so the narrow "greeting unmuted before Flux connected" window
         # is visible during live validation rather than looking like dead STT.
-        if not self._transport_is_active() and not self._warned_early_audio:
+        if not self._transport_is_active() and any(audio) and not self._warned_early_audio:
             self._warned_early_audio = True
             logger.warning(
                 "Deferred Flux STT: user audio arrived before the websocket was "
-                "ready; dropping until connected (expected only briefly after the greeting)"
+                "ready; dropping non-silent input until connected"
             )
         async for frame in super().run_stt(audio):
             yield frame

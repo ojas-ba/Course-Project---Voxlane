@@ -2,7 +2,6 @@
 
 from pathlib import Path
 import math
-import math
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -41,9 +40,11 @@ def _parse_config_form(form: Any, base: RuntimeConfig) -> RuntimeConfig:
     fields = {
         "stt": {"model": "stt_model", "eot_threshold": "stt_eot_threshold",
                 "eot_timeout_ms": "stt_eot_timeout_ms", "turn_stop_timeout_ms": "stt_turn_stop_timeout_ms",
-                "defer_connect_on_start": "stt_defer_connect_on_start"},
+                "defer_connect_on_start": "stt_defer_connect_on_start",
+                "enable_eager_eot": "stt_enable_eager_eot"},
         "llm": {"model": "llm_model", "temperature": "llm_temperature", "max_tokens": "llm_max_tokens",
-                "reasoning_effort": "llm_reasoning_effort", "request_timeout_seconds": "llm_request_timeout_seconds"},
+                "reasoning_effort": "llm_reasoning_effort", "request_timeout_seconds": "llm_request_timeout_seconds",
+                "enable_speculative_llm": "llm_enable_speculative_llm"},
         "tts": {"model": "tts_model", "voice_id": "tts_voice_id"},
         "prompt": {"system_prompt": "system_prompt", "greeting_text": "greeting_text"},
         "memory": {"recent_turn_pairs": "mem_recent_turn_pairs",
@@ -59,6 +60,8 @@ def _parse_config_form(form: Any, base: RuntimeConfig) -> RuntimeConfig:
                 data[group][key] = str(form[field]).strip()
     if "stt_language_hints" in form:
         data["stt"]["language_hints"] = [h.strip() for h in str(form["stt_language_hints"]).split(",") if h.strip()]
+    if "stt_eager_eot_threshold" in form:
+        data["stt"]["eager_eot_threshold"] = str(form["stt_eager_eot_threshold"]).strip() or None
     return RuntimeConfig.model_validate(data)
 
 

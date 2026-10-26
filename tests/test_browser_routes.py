@@ -47,6 +47,12 @@ def test_config_write_failure_and_cross_origin_mutation(client):
 
 
 def test_assets_are_local_and_no_telephony_route_remains(client):
+    page = client.get("/")
+    assert page.status_code == 200
+    assert 'href="/static/talk.css"' in page.text
+    stylesheet = client.get("/static/talk.css")
+    assert stylesheet.status_code == 200
+    assert "text/css" in stylesheet.headers["content-type"]
     assert client.get("/static/demo.js").status_code == 200
     assert client.get("/static/htmx.min.js").status_code == 200
     assert client.get("/telephony/webhook").status_code == 404
@@ -55,7 +61,8 @@ def test_assets_are_local_and_no_telephony_route_remains(client):
 def test_cerebras_wire_request_has_completion_cap_and_reasoning():
     snapshot = build_config_snapshot(get_settings())
     params = _build_llm(snapshot, get_settings()).build_chat_completion_params({"messages": []})
-    assert params["max_completion_tokens"] == 160
+    assert params["max_completion_tokens"] == 1024
+    assert params["model"] == "qwen-3.8-27b"
     assert params["reasoning_effort"] == "none"
     assert params["stream"] is True
     assert "max_tokens" not in params

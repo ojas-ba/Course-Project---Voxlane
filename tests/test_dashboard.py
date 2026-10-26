@@ -29,7 +29,8 @@ def test_config_page_renders(client):
     assert "Memory" in response.text
     assert "EOT timeout (ms)" in response.text
     assert "Turn stop debounce timeout" in response.text  # LAT-2 configurable debounce
-    assert "Enable EagerEOT telemetry" not in response.text     # Stage-1 eager probe config
+    assert "Enable eager EOT" in response.text
+    assert "Enable speculative LLM" in response.text
 
 
 def test_root_renders_browser(client):
@@ -70,6 +71,23 @@ def test_config_save(client):
     saved = mock_save.call_args.args[0]
     assert saved.tts.voice_id == "voice-x"
     assert saved.prompt.system_prompt == "Be helpful."
+
+
+def test_eager_and_speculation_settings_roundtrip_and_invalid_combinations_fail(client):
+    values = {"stt_enable_eager_eot": "true", "stt_eager_eot_threshold": "0.5",
+              "llm_enable_speculative_llm": "true", "llm_model": "gpt-oss-120b",
+              "llm_reasoning_effort": "low", "llm_max_tokens": "1024"}
+    assert client.post("/config", data=values).status_code == 200
+    from app.services.runtime_config import get_cached_runtime_config
+    config = get_cached_runtime_config()
+    assert config.stt.enable_eager_eot and config.stt.eager_eot_threshold == 0.5
+    assert config.llm.enable_speculative_llm and config.llm.model == "gpt-oss-120b"
+    assert client.post("/config", data={"stt_enable_eager_eot": "false"}).status_code == 422
+    assert client.post("/config", data={"stt_eager_eot_threshold": "0.9"}).status_code == 422
+    assert client.post("/config", data={"stt_eager_eot_threshold": ""}).status_code == 422
+    assert client.post("/config", data={"llm_enable_speculative_llm": "false",
+                                     "stt_enable_eager_eot": "false",
+                                     "stt_eager_eot_threshold": ""}).status_code == 200
 
 
 def test_calls_list_renders(client):

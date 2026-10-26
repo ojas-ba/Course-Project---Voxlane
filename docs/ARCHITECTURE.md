@@ -23,11 +23,12 @@ without replacing the active conversation panel.
 ```mermaid
 flowchart LR
     Browser[Browser] <-->|SmallWebRTC audio/events| Transport
-    Transport --> Flux[Deepgram Flux]
+    Transport --> Gate[User audio gate]
+    Gate --> Flux[Deepgram Flux]
     Flux --> Hint[Language hint]
     Hint --> Memory
     Memory --> User[User aggregator]
-    User --> LLM[Cerebras Qwen]
+    User --> LLM[Cerebras Qwen - reasoning disabled]
     LLM --> Prefix[Language prefix]
     Prefix --> TTS[Cartesia]
     TTS --> Output[Transport output]
@@ -38,11 +39,15 @@ flowchart LR
 Flux final transcription/EndOfTurn drives committed turns. The existing turn collector,
 memory, language-prefix processor, and metrics side channels remain intact.
 The LLM emits `<en>` or `<hi>`; the prefix processor switches the TTS language and
-removes the prefix before speech. Speculative/eager replies are disabled in browser configuration.
+removes the prefix before speech. Settings supports eager EOT telemetry and speculative drafts.
+Drafts are released only after a matching final turn; resumed/mismatched turns fall back to the normal LLM.
+The input gate sends silence during bot speech. Rejected transcripts cannot update memory, history,
+or eager drafts. Browser mic gating follows the same no-barge-in policy.
 
 Observers are registered on `PipelineTask`, including `UserBotLatencyObserver` and
 the existing turn-metrics observer. `SileroVADAnalyzer()` remains in user-aggregator params.
 Pipecat 1.2.1 automatically supplies RTVI; no duplicate RTVI observer is registered.
+Client-js 1.9.0 and SmallWebRTC transport 1.10.2 match its RTVI 1.3.0 protocol.
 
 ## Session lifecycle
 
@@ -59,7 +64,10 @@ greeting speaking-stop callback, respecting the user's Mute selection.
 End, disconnect, provider failure, setup timeout, and shutdown request the same cleanup task.
 Callbacks signal cleanup without waiting for their own runner. Cleanup cancels pending work,
 awaits pipeline cancellation/runner completion, finalizes once, atomically saves, closes the peer,
-and removes runtime state. A stuck runner blocks replacement sessions and requires restart.
+and removes runtime state after saving. HTTP waits have a deadline, but the retained cleanup task
+keeps waiting for actual runner completion before finalizing once. A slow stop does not discard history.
+A failed write retains the finalized payload in memory for an End retry; no second finalization occurs.
+A runner that never stops blocks replacement sessions and may require a process restart.
 
 ## Boundaries
 

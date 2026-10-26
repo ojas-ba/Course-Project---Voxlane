@@ -43,12 +43,28 @@
             <option value="true" {{ 'selected' if config.stt.defer_connect_on_start }}>true</option>
             <option value="false" {{ 'selected' if not config.stt.defer_connect_on_start }}>false</option>
           </select>
-          <p class="hint">Connect the Flux socket in the background so the greeting isn't blocked ~1s. Keep <code>true</code>.</p>
+          <p class="hint">Connect Flux while browser audio is being prepared. The greeting waits until both are ready.</p>
         </div>
         <div>
           <label>Turn stop debounce timeout (ms)</label>
           <input name="stt_turn_stop_timeout_ms" value="{{ config.stt.turn_stop_timeout_ms }}" />
           <p class="hint">Controls Pipecat's post-STT delay before triggering the LLM (NOT Deepgram <code>eot_timeout_ms</code>). Lower values reduce latency but may increase fragmented turns. Range 100–1000; default <code>500</code>.</p>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Enable eager EOT</label>
+          <select name="stt_enable_eager_eot">
+            {% for enabled in [true, false] %}
+            <option value="{{ 'true' if enabled else 'false' }}" {{ 'selected' if config.stt.enable_eager_eot == enabled }}>{{ 'true' if enabled else 'false' }}</option>
+            {% endfor %}
+          </select>
+          <p class="hint">Ask Flux for early turn signals. Enable speculative LLM below to generate replies early.</p>
+        </div>
+        <div>
+          <label>Eager EOT threshold</label>
+          <input name="stt_eager_eot_threshold" value="{{ config.stt.eager_eot_threshold if config.stt.eager_eot_threshold is not none else '' }}" />
+          <p class="hint">Required when eager EOT is enabled. Range 0.3–0.9 and no higher than the EOT threshold.</p>
         </div>
       </div>
     </fieldset>
@@ -61,7 +77,7 @@
       <div class="row">
         <div>
           <label>Max tokens</label><input name="llm_max_tokens" value="{{ config.llm.max_tokens }}" />
-          <p class="hint">Caps reply length. Smaller = faster, shorter spoken replies.</p>
+          <p class="hint">Includes reasoning and final answer tokens. GPT-OSS starts at 1024; the prompt keeps spoken replies short.</p>
         </div>
         <div><label>Request timeout (s)</label><input name="llm_request_timeout_seconds" value="{{ config.llm.request_timeout_seconds }}" />
           <p class="hint">Hard timeout per LLM request (wired to the Cerebras client).</p></div>
@@ -73,6 +89,13 @@
         {% endfor %}
       </select>
       <p class="hint">Use none for quick Qwen replies. GPT-OSS requires low, medium, or high.</p>
+      <label>Enable speculative LLM</label>
+      <select name="llm_enable_speculative_llm">
+        {% for enabled in [true, false] %}
+        <option value="{{ 'true' if enabled else 'false' }}" {{ 'selected' if config.llm.enable_speculative_llm == enabled }}>{{ 'true' if enabled else 'false' }}</option>
+        {% endfor %}
+      </select>
+      <p class="hint">Requires eager EOT. Drafts early, then speaks only after the final turn matches. Resumed speech cancels the draft.</p>
     </fieldset>
 
     <fieldset><legend>TTS — Cartesia</legend>
@@ -115,6 +138,7 @@
       <label>Log level (next restart)</label><input name="debug_log_level" value="{{ config.ops.debug_log_level }}" />
       <label>Browser readiness timeout (seconds)</label><input name="browser_ready_timeout_secs" value="{{ config.ops.browser_ready_timeout_secs }}" />
       <label>Shutdown timeout (seconds)</label><input name="shutdown_timeout_secs" value="{{ config.ops.shutdown_timeout_secs }}" />
+      <p class="hint">How long End waits before offering Retry saving. Cleanup continues until the pipeline has finished.</p>
       <p class="hint">Set <code>DEBUG</code> to see Flux start/eager/resume turn events.</p>
     </fieldset>
 

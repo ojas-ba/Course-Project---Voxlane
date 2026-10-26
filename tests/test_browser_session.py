@@ -16,6 +16,7 @@ from app.runtime import ACTIVE_SESSIONS
 from app.services.browser_session import BrowserSessionManager
 from app.services.pipecat_pipeline import PipelineExecutionResult
 from app.services import runtime_config
+from app.utils.metrics_logger import finalize_call_log
 
 
 class Events:
@@ -174,7 +175,85 @@ async def test_save_failure_releases_slot_and_returns_no_history_link(setup_mana
     with patch("app.storage.persist_call_log", new=AsyncMock(side_effect=OSError("disk full"))):
         result = await manager.end(manager._live.call_sid)
     assert not result.saved and result.history_url is None
-    assert manager._live is None and peer.closed and ACTIVE_SESSIONS == {}
+    assert manager._live is None and peer.closed
+    assert result.call_sid in ACTIVE_SESSIONS
+    assert (await manager.end(result.call_sid)).saved
+    assert ACTIVE_SESSIONS == {}
+
+
+@pytest.mark.asyncio
+async def test_slow_runner_eventually_saves_once_after_end_wait_expires(setup_manager):
+    manager, peer, task, *_ = setup_manager
+    release = asyncio.Event()
+
+    async def slow_pipeline(**kwargs):
+        kwargs["hooks"].on_task(task, asyncio.Event().wait)
+        await task.finished.wait()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()  # Simulate asynchronous provider/processor cleanup.
+        return PipelineExecutionResult(completed=True)
+
+    manager._pipeline = slow_pipeline
+    await manager.offer(OfferRequest(sdp="offer", type="offer"))
+    live = manager._live
+    live.snapshot["runtime_config"]["ops"]["shutdown_timeout_secs"] = 0.01
+    with patch("app.storage.persist_call_log", wraps=storage.persist_call_log) as save, \
+         patch("app.services.browser_session.finalize_call_log", wraps=finalize_call_log) as finalize:
+        result = await manager.end(live.call_sid)
+        assert not result.saved and "still ending" in result.error
+        assert manager._live is live and save.await_count == 0
+        with pytest.raises(HTTPException) as failure:
+            await manager.offer(OfferRequest(sdp="other", type="offer"))
+        assert failure.value.status_code == 409
+        release.set()
+        assert (await live.cleanup).saved
+        assert (await manager.end(live.call_sid)).saved
+        assert save.await_count == finalize.call_count == 1
+    assert manager._live is None and not manager._stuck and ACTIVE_SESSIONS == {}
+
+
+@pytest.mark.asyncio
+async def test_failed_save_retries_are_serialized_without_refinalizing(setup_manager):
+    manager, _, _, *_ = setup_manager
+    await manager.offer(OfferRequest(sdp="offer", type="offer"))
+    call_sid = manager._live.call_sid
+    actual_save = storage.persist_call_log
+    with patch("app.storage.persist_call_log", new=AsyncMock(side_effect=OSError("disk full"))):
+        assert not (await manager.end(call_sid)).saved
+    with patch("app.services.browser_session.finalize_call_log") as finalize, \
+         patch("app.storage.persist_call_log", wraps=actual_save) as save:
+        first, second = await asyncio.gather(manager.end(call_sid), manager.end(call_sid))
+        assert first.saved and second.saved
+        assert save.await_count == 1 and finalize.call_count == 0
+    assert ACTIVE_SESSIONS == {}
+
+
+@pytest.mark.asyncio
+async def test_canceled_save_retry_does_not_cancel_file_transaction(setup_manager):
+    manager, *_ = setup_manager
+    await manager.offer(OfferRequest(sdp="offer", type="offer"))
+    call_sid = manager._live.call_sid
+    with patch("app.storage.persist_call_log", new=AsyncMock(side_effect=OSError("disk full"))):
+        await manager.end(call_sid)
+    entered, release = asyncio.Event(), asyncio.Event()
+    actual = storage.persist_call_log
+
+    async def slow_save(log):
+        entered.set()
+        await release.wait()
+        return await actual(log)
+
+    with patch("app.storage.persist_call_log", new=slow_save):
+        request = asyncio.create_task(manager.end(call_sid))
+        await entered.wait()
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        release.set()
+        assert (await manager.end(call_sid)).saved
+    assert call_sid not in ACTIVE_SESSIONS
 
 
 @pytest.mark.asyncio

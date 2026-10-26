@@ -28,15 +28,15 @@ class STTCfg(RuntimeModel):
     language_hints: list[str] = Field(default_factory=lambda: ["en", "hi"])
     eot_threshold: float = Field(default=0.65, ge=0.5, le=1.0)
     eot_timeout_ms: int = Field(default=700, ge=500, le=60000)
-    # Connect the Flux websocket in the background on start so the opening
-    # greeting isn't blocked ~1s waiting for STT (see deferred_flux_stt.py).
+    # Overlap Flux connection with browser setup; the greeting still waits for readiness.
     defer_connect_on_start: bool = True
     # Pipecat's POST-STT user-turn debounce before the LLM fires — NOT Deepgram
     # endpointing (that is eot_timeout_ms). Pipecat's ExternalUserTurnStopStrategy
     # default is 500ms; because UserStoppedSpeakingFrame (a SystemFrame) overtakes
     # the queued finalized TranscriptionFrame, the immediate trigger misses and
-    # THIS timeout is what actually fires the turn — so it is a fixed per-turn
-    # pre-LLM delay. Default 500 preserves current behavior; lower = less latency
+    # THIS timeout can fire the turn. Measure frame ordering rather than assuming
+    # an identical delay on every turn. Default 500 preserves existing tuning;
+    # lower = less latency
     # but too low risks splitting a turn whose final transcript arrives in pieces.
     turn_stop_timeout_ms: int = Field(default=500, ge=100, le=1000)
     # --- EagerEndOfTurn telemetry (Stage 1; OFF by default — no behavior change) ---
@@ -80,7 +80,7 @@ class LLMCfg(RuntimeModel):
     model: Literal["qwen-3.8-27b", "gpt-oss-120b"] = "qwen-3.8-27b"
     reasoning_effort: Literal["none", "low", "medium", "high"] = "none"
     temperature: float = Field(default=0.7, ge=0, le=2)
-    max_tokens: int = Field(default=160, ge=16, le=2048)
+    max_tokens: int = Field(default=1024, ge=16, le=2048)
     request_timeout_seconds: float = Field(default=10.0, ge=1, le=60)
     # --- Stage-2 speculative LLM (OFF by default — no behavior change) ---
     # When enabled, an out-of-band Cerebras draft is started on Deepgram Flux
@@ -130,7 +130,7 @@ class OpsCfg(RuntimeModel):
     """Frontend-editable local readiness and shutdown budgets."""
     debug_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     browser_ready_timeout_secs: float = Field(default=30.0, ge=5, le=120)
-    shutdown_timeout_secs: float = Field(default=10.0, ge=1, le=30)
+    shutdown_timeout_secs: float = Field(default=30.0, ge=1, le=60)
 
 
 class RuntimeConfig(RuntimeModel):
@@ -146,9 +146,9 @@ class RuntimeConfig(RuntimeModel):
 
     @model_validator(mode="after")
     def validate_browser_config(self) -> "RuntimeConfig":
-        """Reject settings that the browser prototype does not implement."""
-        if self.stt.enable_eager_eot or self.llm.enable_speculative_llm:
-            raise ValueError("Eager/speculative replies are disabled in the browser prototype")
+        """Validate dependencies between generation and turn-boundary settings."""
+        if self.llm.enable_speculative_llm and not self.stt.enable_eager_eot:
+            raise ValueError("Speculative LLM requires enable_eager_eot")
         if self.llm.model == "gpt-oss-120b" and self.llm.reasoning_effort == "none":
             raise ValueError("GPT-OSS reasoning_effort must be low, medium, or high")
         if not self.prompt.greeting_text.strip() or not self.prompt.system_prompt.strip():

@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+from pathlib import Path
+import re
 
 from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 import pytest
@@ -14,6 +16,13 @@ from app.models.browser_models import OfferRequest
 from app.services.browser_session import BrowserSessionManager
 from app.services.pipecat_pipeline import PipelineExecutionResult
 from app.services import runtime_config
+
+
+def test_installed_browser_sdk_matches_server_protocol():
+    from pipecat.processors.frameworks.rtvi.models import PROTOCOL_VERSION
+    types = (Path(__file__).resolve().parents[1] / "frontend/node_modules/@pipecat-ai/client-js/dist/index.d.ts").read_text()
+    match = re.search(r'RTVI_PROTOCOL_VERSION = "([^"]+)"', types)
+    assert match is not None and match.group(1) == PROTOCOL_VERSION == "1.3.0"
 
 
 @pytest.mark.asyncio
@@ -53,7 +62,7 @@ async def test_actual_peer_handshake_rtvi_readiness_and_silent_audio():
     @channel.on("open")
     def opened():
         channel.send(json.dumps({"label": "rtvi-ai", "id": "ready", "type": "client-ready",
-                                 "data": {"version": "2.1.0"}}))
+                                 "data": {"version": "1.3.0"}}))
 
     @channel.on("message")
     def message(raw):

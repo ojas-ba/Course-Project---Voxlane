@@ -182,9 +182,11 @@ def test_audio_before_connect_is_dropped_and_warned_once():
     assert svc._websocket is None          # not connected yet
     assert svc._warned_early_audio is False
 
-    async def drain():
-        return [f async for f in svc.run_stt(b"\x00\x00")]
+    async def drain(audio=b"\x01\x00"):
+        return [f async for f in svc.run_stt(audio)]
 
+    assert asyncio.run(drain(b"\x00\x00")) == []
+    assert svc._warned_early_audio is False  # Muted WebRTC silence is expected.
     assert asyncio.run(drain()) == []       # base drops audio when not connected
     assert svc._warned_early_audio is True  # warned exactly once
     # A second early frame must not raise and must not reset the warning flag.

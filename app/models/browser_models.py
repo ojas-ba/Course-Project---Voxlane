@@ -37,3 +37,14 @@ class EndResult(BaseModel):
     saved: bool
     history_url: str | None = None
     error: str | None = None
+
+
+class AudioDiagnostics(BaseModel):
+    """Allowlisted browser capture metadata for local structured diagnostics."""
+
+    label: str = Field(default="", max_length=120)
+    sample_rate: int | None = Field(default=None, alias="sampleRate", ge=8000, le=384000)
+    channel_count: int | None = Field(default=None, alias="channelCount", ge=1, le=32)
+    echo_cancellation: bool | None = Field(default=None, alias="echoCancellation")
+    noise_suppression: bool | None = Field(default=None, alias="noiseSuppression")
+    auto_gain_control: bool | None = Field(default=None, alias="autoGainControl")

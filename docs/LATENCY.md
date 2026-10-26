@@ -6,11 +6,14 @@ No latency number from the old telephone prototype is a browser performance guar
 ## What stays fast
 
 - Cerebras final-answer tokens stream into Cartesia sentence synthesis; the full response is not buffered.
-- Qwen reasoning is disabled explicitly and the configured limit reaches `max_completion_tokens`.
+- Qwen runs with reasoning explicitly disabled in normal and speculative requests.
+  The prompt keeps spoken answers short; 1024 tokens is an output ceiling, not a target to generate.
 - VAD is warmed locally at startup. Flux connection overlaps media setup.
 - The greeting waits for browser playback and Flux readiness instead of using a carrier settle delay.
 - Bounded recent context and the existing memory budget keep prompt work controlled.
-- Speculative/eager behavior stays disabled for a clear baseline.
+- Eager/speculative behavior is configurable. A matching draft hides part of the generation wait;
+  it never speaks before final EOT. Compare enabled/disabled runs rather than assuming a saving.
+- Normal and draft requests have a total deadline and SDK retries are disabled.
 
 ## What to measure
 
@@ -21,6 +24,8 @@ These are backend events. Network jitter, codec buffering, and browser playback 
 Flux `eot_timeout_ms` is a maximum silence fallback, not necessarily the wait on every turn.
 Pipecat's separate `turn_stop_timeout_ms` is the post-STT debounce. Tune one variable at a time
 through Settings after a person has established the browser baseline.
+The repaired local setup restores the 700 ms Flux silence fallback, keeping the existing
+500 ms post-STT debounce. These are starting values, not recovered historical MongoDB tuning.
 
 The first greeting can wait for provider connection readiness. This trades some first-connect
 speed for not losing the first utterance. It is separate from steady-state turn responsiveness.

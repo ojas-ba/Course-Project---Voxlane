@@ -1,5 +1,8 @@
 # Browser voice agent: reviewed implementation plan
 
+Historical conversion plan. The later [repair plan](BROWSER_REPAIR_PLAN.md) supersedes its
+model choice, browser package pins, eager/speculative restrictions, and shutdown handling.
+
 Reviewed against this repository, installed Pipecat APIs, and current official documentation on **16 October 2026**. Scope: one person using a browser on the same computer as Python.
 
 **Build one browser voice agent using the existing Python/Pipecat pipeline, Jinja/HTMX pages, SmallWebRTC, and local JSON files. Remove Exotel and MongoDB from the application. React is unnecessary.**

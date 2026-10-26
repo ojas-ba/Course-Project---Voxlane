@@ -327,6 +327,29 @@ def test_draft_error_falls_back_to_normal():
         ACTIVE_SESSIONS.pop(call_sid, None)
 
 
+def test_reasoning_only_draft_falls_back_without_releasing_an_empty_reply():
+    from types import SimpleNamespace
+    call_sid = "reasoning-only-draft"
+    _seed_session(call_sid)
+
+    async def reasoning_only(messages):
+        yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=None, reasoning="private reasoning"))])
+
+    ctl = _ctl(call_sid, reasoning_only)
+
+    async def run():
+        await ctl.on_turn_start()
+        await ctl.on_eager("hello")
+        await ctl._draft_done.wait()
+        await ctl.on_end_of_turn("hello")
+        kind, tokens = await ctl.take_release()
+        assert kind == NORMAL and tokens is None
+        assert ctl.marks["draft_error"] is True
+        assert not ctl._token_buffer
+
+    asyncio.run(run())
+
+
 def test_norm_match_uses_shared_normalization():
     call_sid = "c_spec_a11"
     _seed_session(call_sid)

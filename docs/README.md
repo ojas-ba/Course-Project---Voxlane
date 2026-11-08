@@ -5,6 +5,7 @@ The application is a single-user local browser voice agent with SmallWebRTC and 
 | Document | Topic |
 |---|---|
 | [ARCHITECTURE](ARCHITECTURE.md) | Components, pipeline, readiness, and cleanup ownership. |
+| [Final main consolidation](FINAL_MAIN_CONSOLIDATION_PLAN.md) | Branch review, preserved histories, final corrections, verification, and merge requirements. |
 | [Interviews](INTERVIEWS.md) | Recruiter setup, candidate workflow, camera privacy, recovery, reports, and manual checks. |
 | [Interview system explained](INTERVIEW_SYSTEM_EXPLAINED.md) | Presentation guide: complete workflow, component connections, speech/vision models, data flow, reports and prototype limitations. |
 | [UI redesign](UI_REDESIGN.md) | Indigo/slate presentation update, files, verification and manual review boundaries. |

@@ -7,7 +7,7 @@ Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/LATENCY.md](docs/
 ## Mission
 
 Help build a local-development, open-ended multilingual browser voice agent using Pipecat,
-SmallWebRTC, Deepgram Flux, Cerebras, Cartesia, FastAPI, and local JSON persistence.
+SmallWebRTC, Sarvam realtime STT, Cerebras, Sarvam Bulbul v3 TTS, FastAPI, and local JSON persistence.
 
 The human handles real microphone/speaker behavior, voice quality, and latency validation. The AI owns
 code quality, architecture adherence, type-safe implementation, structured logging, and normal

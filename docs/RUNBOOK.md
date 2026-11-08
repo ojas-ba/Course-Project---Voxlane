@@ -4,7 +4,8 @@
 
 1. Activate the Python environment and install with `python -m pip install -e .`.
 2. Configure the SARVAM_API_KEY and CEREBRAS_API_KEY in your own `.env`; see `.env.example`.
-3. Run `npm --prefix frontend ci` and `npm --prefix frontend run build`.
+3. Use Node 22.14+ and run `npm --prefix frontend ci`,
+   `npm --prefix frontend run prepare:vision`, then `npm --prefix frontend run build`.
 4. Run `python -m uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1`.
 5. Open `http://localhost:8000/config`, review the Bulbul v3 voice (default shubh), and save.
 6. Open `http://localhost:8000`, Start, and allow the mic.
@@ -12,6 +13,10 @@
 A missing frontend build, invalid config file, or unwritable data folder fails startup.
 A missing voice blocks Start before provider work. Old Exotel/Mongo environment variables are ignored;
 the application needs no phone service, database, or tunnel.
+Startup checks every required browser script and stylesheet, including `candidate-view.js`.
+Vision preparation verifies both local model checksums; the build copies the matching WASM files.
+Missing or unavailable vision assets produce the existing visible voice-only fallback rather
+than blocking voice participation. See [Interviews](INTERVIEWS.md) for camera checks.
 
 ## Normal automated checks
 

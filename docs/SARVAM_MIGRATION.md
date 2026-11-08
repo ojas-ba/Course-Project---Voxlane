@@ -55,6 +55,7 @@ frontend JavaScript change was required. `.gitignore` excludes local verificatio
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -e .
 npm.cmd --prefix frontend ci
+npm.cmd --prefix frontend run prepare:vision
 npm.cmd --prefix frontend run build
 .\.venv\Scripts\python -m uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
 ```

@@ -23,6 +23,10 @@ from app.services.runtime_config import close_runtime_config, seed_runtime_confi
 from app.services.warmup import run_local_warmup
 
 STATIC_DIR = Path(__file__).resolve().parent / "app" / "static"
+REQUIRED_BROWSER_ASSETS: tuple[str, ...] = (
+    "demo.js", "htmx.min.js", "recruiter.js", "candidate.js", "candidate-view.js",
+    "camera-worker.js", "base.css", "studio.css", "talk.css",
+)
 
 
 @asynccontextmanager
@@ -30,9 +34,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialize local resources; provider sockets are opened only per conversation."""
     setup_logging()
     settings = get_settings()
-    for asset in ("demo.js", "htmx.min.js", "recruiter.js", "candidate.js", "camera-worker.js"):
-        if not (STATIC_DIR / asset).is_file():
-            raise RuntimeError("Browser assets missing. Run npm --prefix frontend ci and npm --prefix frontend run build")
+    missing_assets = [asset for asset in REQUIRED_BROWSER_ASSETS if not (STATIC_DIR / asset).is_file()]
+    if missing_assets:
+        raise RuntimeError(
+            f"Browser assets missing: {', '.join(missing_assets)}. "
+            "Run npm --prefix frontend ci and npm --prefix frontend run build"
+        )
     config = await seed_runtime_config_if_missing(settings)
     setup_logging(log_level=config.ops.debug_log_level)
     await run_local_warmup(settings)

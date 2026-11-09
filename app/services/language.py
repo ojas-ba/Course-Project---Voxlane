@@ -2,12 +2,12 @@
 
 V3 language routing is **LLM-led**: the main Cerebras response begins with a tiny
 tag — ``<en>`` or ``<hi>`` — chosen by the model. A ``LanguagePrefixProcessor``
-(between the LLM and Cartesia TTS) strips that tag, switches Cartesia's language
+(between the LLM and Sarvam TTS) strips that tag, switches Sarvam's language
 before any spoken text is forwarded, and streams the rest straight through.
 
 There is intentionally **no** regex "language override" engine here anymore: a
 growing list of "english mein bolo / baat kijiye / continue in english" patterns
-never ends. Deepgram's detected language is kept only as a *weak hint* fed into
+never ends. Sarvam's detected language is kept only as a *weak hint* fed into
 the prompt; the model is the authority.
 
 Everything here is deterministic and JSON-safe.
@@ -26,9 +26,12 @@ DEFAULT_LANGUAGE = "en"
 _CODE_TO_ENUM = {
     "en": Language.EN,
     "hi": Language.HI,
+    "kn": Language.KN,
+    "mr": Language.MR,
+    "te": Language.TE,
 }
 
-SUPPORTED_RESPONSE_LANGUAGES = ("en", "hi")
+SUPPORTED_RESPONSE_LANGUAGES = ("en", "hi", "kn", "mr", "te")
 
 # The tag the LLM must emit at the very start of every reply. Kept short so the
 # prefix buffer stays tiny and streaming is barely delayed.
@@ -44,12 +47,15 @@ RESPONSE_LANGUAGE_POLICY = (
     "Begin EVERY reply with exactly ONE language tag as the VERY FIRST characters:\n"
     "  <en> = reply in English only.\n"
     "  <hi> = reply in simple, natural Hindi/Hinglish suitable for an Indian phone call.\n"
+    "  <kn> = Kannada. <mr> = Marathi. <te> = Telugu.\n"
+    "Use native script for Hindi, Kannada, Marathi and Telugu, allowing natural English technical terms.\n"
+    "Honor explicit requests for any of these five languages.\n"
     "The tag MUST be the first text in the reply. Never place a tag in the middle of "
     "the reply. Never repeat the tag. Never skip it. Immediately after the tag, write "
     "only the words to be spoken. The tag is for the system and must NOT be spoken or "
     "explained.\n"
     "Language choice:\n"
-    "- If the user explicitly asks for English, use <en>; for Hindi/Hinglish, use <hi>.\n"
+    "- Honor explicit requests: English <en>, Hindi <hi>, Kannada <kn>, Marathi <mr>, Telugu <te>.\n"
     "- Otherwise mirror the latest user's language and style.\n"
     "- Keep phone replies short: usually 1-2 sentences. Ask one question at a time.\n"
     "- Do not output JSON, markdown, code fences, or quotes around your reply."
@@ -159,14 +165,14 @@ def fallback_response_language(state: dict[str, Any] | None) -> str:
 def language_hint_line(state: dict[str, Any] | None) -> str:
     """A short weak-hint line for the prompt (the model still decides)."""
     code = _normalize_code((state or {}).get("last_user_language")) or DEFAULT_LANGUAGE
-    name = {"en": "English", "hi": "Hindi/Hinglish"}.get(code, code)
+    name = {"en": "English", "hi": "Hindi", "kn": "Kannada", "mr": "Marathi", "te": "Telugu"}.get(code, code)
     return f"(Weak hint: the user's most recent turn looked like {name}. You decide the reply language.)"
 
 
 # --- <en>/<hi> prefix parsing (used by LanguagePrefixProcessor) -------------
 
-_PREFIX_RE = re.compile(r"\s*<(en|hi)>", re.IGNORECASE)
-_PREFIX_CANDIDATES = ("<en>", "<hi>")
+_PREFIX_RE = re.compile(r"\s*<(en|hi|kn|mr|te)>", re.IGNORECASE)
+_PREFIX_CANDIDATES = tuple(f"<{code}>" for code in SUPPORTED_RESPONSE_LANGUAGES)
 
 # Strips a leading, well-formed-ish ``<...>`` fragment (used ONLY on the fallback
 # path, so a malformed tag like ``<eng>`` / ``<<en>>`` is never spoken).
@@ -213,9 +219,9 @@ def sanitize_prefix_fallback_text(text: str) -> str:
 # --- universal control-tag sanitizers (defensive: TTS / context / transcript) ---
 
 # A well-formed internal control tag (<en> / <hi>), anywhere in the text.
-_CONTROL_TAG_RE = re.compile(r"<\s*(?:en|hi)\s*>", re.IGNORECASE)
+_CONTROL_TAG_RE = re.compile(r"<\s*(?:en|hi|kn|mr|te)\s*>", re.IGNORECASE)
 # A leading UNCLOSED control fragment, e.g. "<hi Okay." or "<en " (no '>').
-_LEADING_UNCLOSED_CONTROL_RE = re.compile(r"^\s*<\s*(?:en|hi)\b\s*", re.IGNORECASE)
+_LEADING_UNCLOSED_CONTROL_RE = re.compile(r"^\s*<\s*(?:en|hi|kn|mr|te)\b\s*", re.IGNORECASE)
 # A trailing fragment that could still be FORMING a control tag (streaming carry).
 _PARTIAL_TAG_TAIL_RE = re.compile(r"<[^>]{0,3}$")
 
@@ -262,7 +268,7 @@ def split_safe_emit(buffer: str) -> tuple[str, str]:
     m = _PARTIAL_TAG_TAIL_RE.search(buffer)
     if m:
         inner = buffer[m.start():].lstrip("<").strip().lower()
-        if inner == "" or "en".startswith(inner) or "hi".startswith(inner):
+        if inner == "" or any(code.startswith(inner) for code in SUPPORTED_RESPONSE_LANGUAGES):
             return buffer[: m.start()], buffer[m.start():]
     return buffer, ""
 

@@ -1,5 +1,9 @@
 # Metrics & Observability
 
+The current Sarvam path commits through its accepted-final callback. Historical Flux
+terminology and eager-probe fields below describe existing saved records; Sarvam does
+not collect eager probes or run speculative drafts. Observer registration is unchanged.
+
 Every call produces a deep, per-turn metrics trail so any latency or failure can be localized to one
 stage. This doc covers the observer, the per-turn record, the timing anchors, the call-outcome
 taxonomy, and how the dashboard renders it all.
@@ -17,7 +21,7 @@ methods** the pipeline calls:
 
 | Side channel | Called from | Carries |
 |---|---|---|
-| `note_user_turn` | Flux `on_end_of_turn` | queues a pending turn with user text + stop anchors |
+| `note_user_turn` | accepted Sarvam final callback | queues a pending turn with user text + stop anchors |
 | `note_assistant_text` | `LanguagePrefixProcessor` | the spoken reply — the **authoritative "LLM done"** signal |
 | `note_language` | `LanguagePrefixProcessor` | detected + response language |
 | `note_memory_timing` | `MemoryProcessor` | memory governance duration + context size |
@@ -114,7 +118,7 @@ Each delta localizes time to exactly one stage (all in ms; `None` when an endpoi
 | `llm_ttfb_ms` | LLM start → first token | LLM time-to-first-byte |
 | `llm_total_ms` | LLM start → done | full LLM stream |
 | `llm_end_to_tts_start_ms` | LLM done → TTS | hand-off (≈ 0, streaming) |
-| `tts_first_audio_ms` | TTS start → first audio | Cartesia synthesis |
+| `tts_first_audio_ms` | TTS start → first audio | Sarvam synthesis |
 | `earliest/latest_user_stop_to_first_audio_ms` | (merged turns) | release-anchored end-to-end |
 
 ---

@@ -5,6 +5,12 @@ The application is a single-user local browser voice agent with SmallWebRTC and 
 | Document | Topic |
 |---|---|
 | [ARCHITECTURE](ARCHITECTURE.md) | Components, pipeline, readiness, and cleanup ownership. |
+| [Final main consolidation](FINAL_MAIN_CONSOLIDATION_PLAN.md) | Branch review, preserved histories, final corrections, verification, and merge requirements. |
+| [Interviews](INTERVIEWS.md) | Recruiter setup, candidate workflow, camera privacy, recovery, reports, and manual checks. |
+| [Interview system explained](INTERVIEW_SYSTEM_EXPLAINED.md) | Presentation guide: complete workflow, component connections, speech/vision models, data flow, reports and prototype limitations. |
+| [UI redesign](UI_REDESIGN.md) | Indigo/slate presentation update, files, verification and manual review boundaries. |
+| [ADR-007](decisions/ADR_007_SINGLE_INTERVIEW.md) | Approved single-interview boundaries and dependency. |
+| [Sarvam migration](SARVAM_MIGRATION.md) | Provider compatibility, startup, and five-language manual checks. |
 | [CONFIGURATION](CONFIGURATION.md) | Local settings, defaults, validation, and snapshots. |
 | [LATENCY](LATENCY.md) | Streaming, endpointing, and honest browser measurement. |
 | [METRICS](METRICS.md) | Observer records, timing anchors, and outcome taxonomy. |
@@ -16,7 +22,7 @@ The application is a single-user local browser voice agent with SmallWebRTC and 
 | [English conversation review](ENGLISH_CONVERSATION_REVIEW.md) | Chat evidence, current research, and focused quality improvements. |
 | [ADR-006](decisions/ADR_006_BROWSER_LOCAL_FILES.md) | Accepted replacement of Exotel/Mongo with browser/local JSON. |
 | [Decisions](decisions/) | Historical decisions; ADR-006 supersedes telephone/storage assumptions. |
-| [SPECULATION](SPECULATION.md) | Optional eager telemetry and speculative LLM drafts. |
+| [SPECULATION](SPECULATION.md) | Historical Flux eager telemetry and speculative drafts; unavailable with Sarvam. |
 | [TELEPHONY](TELEPHONY.md) | Retirement notice for the old telephone path. |
 
 Start with the root [README](../README.md) to run locally.

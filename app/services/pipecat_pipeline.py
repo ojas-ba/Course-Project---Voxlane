@@ -1,29 +1,8 @@
-"""Pipecat pipeline service for the V3 open-ended voice agent.
+"""Build the existing browser pipeline with Sarvam speech and Cerebras generation.
 
-Assembles and runs the multilingual STT -> LLM -> TTS pipeline over the browser
-transport. Processor order:
-
-    transport.input()
-      -> Deepgram Flux STT (flux-general-multi; background connect, §deferred)
-      -> SttLanguageHintProcessor (records weak detected-language hint only)
-      -> MemoryProcessor (system block = persona + <en>/<hi> policy + memory)
-      -> context_aggregator.user()
-      -> Cerebras LLM (reply starts with an <en>/<hi> tag)
-      -> LanguagePrefixProcessor (strip tag, set Cartesia language, stream text)
-      -> Cartesia TTS
-      -> transport.output()
-      -> context_aggregator.assistant()
-
-Language is **LLM-led**: the model tags each reply ``<en>``/``<hi>`` and the
-LanguagePrefixProcessor routes Cartesia's language from that tag while streaming
-the spoken text — one LLM call per turn, no regex override engine, no JSON
-buffering. Detected STT language is only a weak prompt hint.
-
-The committed user turn is driven natively by Flux end-of-turn (finalized
-TranscriptionFrame + UserStoppedSpeakingFrame), which flushes the user
-aggregator into the LLM. TurnCollector + TurnMetricsObserver ride the
-``on_end_of_turn`` side channel for commit/transcript/metrics; they do NOT
-generate replies. The configured greeting is the only manually queued speech.
+Realtime STT gates accepted finals before memory, collection, and aggregation.
+The language-prefix processor switches streaming TTS before forwarding speech.
+Transport, observers, memory, aggregators, and session ownership remain unchanged.
 """
 
 from __future__ import annotations
@@ -51,9 +30,8 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.services.cartesia.tts import CartesiaTTSService, CartesiaTTSSettings
+from pipecat.services.sarvam.tts import SarvamTTSService
 from pipecat.services.cerebras.llm import CerebrasLLMService, CerebrasLLMSettings
-from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 from pipecat.services.tts_service import TextAggregationMode
 from pipecat.transports.base_transport import BaseTransport
 from pipecat.turns.user_mute import (
@@ -82,7 +60,7 @@ from app.services import language as lang
 from app.services import memory as mem
 from app.services.call_metrics import TurnMetricsObserver
 from app.services.cerebras_service import VoiceCerebrasLLMService
-from app.services.deferred_flux_stt import DeferredConnectDeepgramFluxSTTService
+from app.services.sarvam_realtime_stt import SarvamRealtimeSTTService
 from app.services.language_prefix import LanguagePrefixProcessor
 from app.services.speculation_controller import (
     SpecGateProcessor,
@@ -91,9 +69,8 @@ from app.services.speculation_controller import (
 )
 from app.services.turn_collector import TurnCollector, utc_now
 from app.services.user_input import UserInputGate
-
-MULTILINGUAL_FLUX_MODEL = "flux-general-multi"
-
+from app.interviews.service import InterviewBinding
+from app.interviews.processor import InterviewResponseProcessor
 
 def _stt_cfg(snapshot: ConfigSnapshot) -> dict[str, Any]:
     return (snapshot.get("runtime_config") or {}).get("stt") or {}
@@ -103,58 +80,34 @@ def _llm_cfg(snapshot: ConfigSnapshot) -> dict[str, Any]:
     return (snapshot.get("runtime_config") or {}).get("llm") or {}
 
 
-def _build_stt(snapshot: ConfigSnapshot, settings: Settings) -> DeepgramFluxSTTService:
-    """Construct the Deepgram Flux STT service from the runtime config.
-
-    Uses ``flux-general-multi`` with language hints for Hindi/English. Hints are
-    only honored on the multilingual model, so they are only passed there. When
-    ``stt.defer_connect_on_start`` is set (default), the deferred-connect subclass
-    is used so the opening greeting isn't blocked behind the Flux websocket.
-    """
-
+def _build_stt(snapshot: ConfigSnapshot, settings: Settings) -> SarvamRealtimeSTTService:
+    """Construct original-language realtime STT at the fixed PCM boundary."""
     cfg = _stt_cfg(snapshot)
-    model = cfg.get("model", MULTILINGUAL_FLUX_MODEL)
-    hints = lang.language_hints_to_enums(cfg.get("language_hints", ["en", "hi"]))
-    stt_settings = DeepgramFluxSTTService.Settings(
-        model=model,
-        eot_threshold=cfg.get("eot_threshold", 0.65),
-        eot_timeout_ms=cfg.get("eot_timeout_ms", 700),
+    return SarvamRealtimeSTTService(
+        api_key=settings.sarvam_api_key,
+        settings=SarvamRealtimeSTTService.Settings(
+            model=cfg.get("model", "saaras:v3-realtime"),
+            language_code=cfg.get("language_code", "auto"),
+            stream_type=cfg.get("stream_type", "fast"),
+            threshold=cfg.get("threshold", 0.3),
+            silence_duration_ms=cfg.get("silence_duration_ms", 700),
+            min_speech_duration_ms=cfg.get("min_speech_duration_ms", 250),
+        ),
     )
-    if hints and model == MULTILINGUAL_FLUX_MODEL:
-        stt_settings.language_hints = hints
-    # EagerEndOfTurn telemetry (Stage 1): only ask Flux for eager events when the
-    # flag is on. Passing eager_eot_threshold is what turns EagerEndOfTurn/
-    # TurnResumed on at the Flux server, so leaving it unset keeps behavior identical.
-    if cfg.get("enable_eager_eot") and cfg.get("eager_eot_threshold") is not None:
-        stt_settings.eager_eot_threshold = float(cfg["eager_eot_threshold"])
 
-    stt_cls = (
-        DeferredConnectDeepgramFluxSTTService
-        if cfg.get("defer_connect_on_start", True)
-        else DeepgramFluxSTTService
-    )
-    return stt_cls(
-        api_key=settings.deepgram_api_key,
+
+def _build_tts(snapshot: ConfigSnapshot, settings: Settings) -> SarvamTTSService:
+    """Use built-in websocket synthesis, sentence streaming and 16 kHz PCM."""
+    cfg = (snapshot.get("runtime_config") or {}).get("tts") or {}
+    return SarvamTTSService(
+        api_key=settings.sarvam_api_key,
         sample_rate=V1_SAMPLE_RATE,
-        should_interrupt=False,
-        settings=stt_settings,
-    )
-
-
-def _build_tts(snapshot: ConfigSnapshot, settings: Settings) -> CartesiaTTSService:
-    """Construct the Cartesia TTS service. Language is switched per turn via
-    TTSUpdateSettingsFrame emitted by the LanguagePrefixProcessor (from the
-    LLM's <en>/<hi> tag)."""
-
-    return CartesiaTTSService(
-        api_key=settings.cartesia_api_key,
-        sample_rate=V1_SAMPLE_RATE,
-        cartesia_version="2026-03-01",
         text_aggregation_mode=TextAggregationMode.SENTENCE,
-        max_buffer_delay_ms=0,
-        settings=CartesiaTTSSettings(
-            voice=snapshot["TTS_VOICE_ID"],
-            model=snapshot["TTS_MODEL"],
+        settings=SarvamTTSService.Settings(
+            voice=snapshot["TTS_VOICE_ID"], model=snapshot["TTS_MODEL"],
+            language=lang.to_language_enum("en"),
+            pace=cfg.get("pace", 1.0), temperature=cfg.get("temperature", 0.6),
+            min_buffer_size=cfg.get("min_buffer_size", 30),
         ),
     )
 
@@ -186,14 +139,7 @@ def _build_context(snapshot: ConfigSnapshot) -> LLMContext:
 
 
 def _user_mute_strategies() -> list[Any]:
-    """User-aggregator mute strategies (greeting-phase audio safety).
-
-    ``MuteUntilFirstBotComplete`` keeps the caller muted until the opening
-    greeting finishes, so early user audio cannot create a misleading turn and
-    STT need not be connected during the greeting — this is precisely what makes
-    the deferred Flux STT connect safe. ``AlwaysUserMute`` then mutes the caller
-    whenever the bot is speaking.
-    """
+    """Mute through greeting completion and whenever the assistant speaks."""
     return [
         MuteUntilFirstBotCompleteUserMuteStrategy(),
         AlwaysUserMuteStrategy(),
@@ -201,17 +147,11 @@ def _user_mute_strategies() -> list[Any]:
 
 
 def _build_user_turn_strategies(*, turn_stop_timeout_ms: int) -> UserTurnStrategies:
-    """External turn strategies with a configurable post-STT debounce.
+    """Use provider boundaries with the existing post-STT debounce.
 
-    The user turn is driven externally by Flux EOT (UserStoppedSpeakingFrame +
-    finalized TranscriptionFrame). Pipecat's ``ExternalUserTurnStopStrategy``
-    default debounce is 500ms; because ``UserStoppedSpeakingFrame`` (a SystemFrame)
-    overtakes the queued finalized ``TranscriptionFrame``, the strategy's immediate
-    trigger misses and that timeout — not the immediate path — is what fires the
-    LLM. So it is a fixed per-turn pre-LLM delay. Exposing it via
-    ``stt.turn_stop_timeout_ms`` lets us tune and live-validate it without a
-    redeploy (LAT-2). NOTE: this is NOT Deepgram endpointing (``eot_timeout_ms``);
-    it is the post-STT user-turn debounce.
+    Sarvam speech-end alone never releases a turn. The adapter forwards a stop
+    only after the final passes collection and mute acceptance. System frames
+    may overtake transcript data frames, so the existing debounce remains.
     """
     return UserTurnStrategies(
         start=[ExternalUserTurnStartStrategy()],
@@ -454,6 +394,8 @@ class PipelineHooks:
     on_connected: Callable[[], None]
     on_disconnected: Callable[[], None]
     on_error: Callable[[str], None]
+    interview: InterviewBinding | None = None
+    on_interview_finished: Callable[[], None] | None = None
 
 
 def _build_pipeline_processors(
@@ -465,13 +407,20 @@ def _build_pipeline_processors(
     stream_sid: str | None,
     metrics_observer: TurnMetricsObserver,
     on_provider_error: Callable[[str], None] | None = None,
+    interview: InterviewBinding | None = None,
+    on_interview_finished: Callable[[], None] | None = None,
 ) -> list[Any]:
     """Construct the full V3 processor list and wire the EOT side channel."""
 
     stt = _build_stt(snapshot, settings)
+    if interview is not None and isinstance(stt, SarvamRealtimeSTTService):
+        stt.configure_turn_hold(int(_stt_cfg(snapshot).get("turn_stop_timeout_ms", 500)))
     tts = _build_tts(snapshot, settings)
-    llm = _build_llm(snapshot, settings)
+    llm = (InterviewResponseProcessor(interview, on_interview_finished)
+           if interview is not None else _build_llm(snapshot, settings))
     context = _build_context(snapshot)
+    if interview is not None and interview.context_messages:
+        context.set_messages(context.messages + interview.context_messages)
     aggregator_pair = _build_aggregator_pair(
         context,
         turn_stop_timeout_ms=int(_stt_cfg(snapshot).get("turn_stop_timeout_ms", 500)),
@@ -509,10 +458,17 @@ def _build_pipeline_processors(
 
         @service.event_handler("on_error")
         async def _on_provider_error(_service: Any, error: Any) -> None:
-            msg = getattr(error, "error", None) or str(error)
-            metrics_observer.note_provider_error(stage=stage, message=f"{stage}: {msg}"[:300])
+            msg = str(getattr(error, "error", None) or error)
+            for api_key in (
+                settings.sarvam_api_key, settings.cerebras_api_key,
+                settings.deepgram_api_key, settings.cartesia_api_key,
+            ):
+                if api_key:
+                    msg = msg.replace(api_key, "[REDACTED]")
+            detail = f"{stage}: {' '.join(msg.split())}"[:300]
+            metrics_observer.note_provider_error(stage=stage, message=detail)
             if on_provider_error is not None:
-                on_provider_error(f"{stage}: provider request failed")
+                on_provider_error(detail)
 
     _register_provider_error(stt, "stt_provider_error")
     _register_provider_error(tts, "tts_provider_error")
@@ -521,14 +477,14 @@ def _build_pipeline_processors(
     language_prefix = LanguagePrefixProcessor(
         call_sid=call_sid, metrics_observer=metrics_observer
     )
-    turn_collector = TurnCollector(call_sid=call_sid, stream_sid=stream_sid)
+    turn_collector = TurnCollector(call_sid=call_sid, stream_sid=stream_sid, source="pipecat_turn_complete")
 
     # Stage-1 EagerEndOfTurn telemetry. A per-turn probe accumulator shared by the
     # Flux turn handlers; it ONLY records timestamps + a transcript preview (no
     # speculative LLM draft, no TTS). It is reset at start_of_turn and consumed at
     # end_of_turn. Attached to the turn record only when eager telemetry is enabled,
     # so with the flag off the records are exactly as today.
-    eager_enabled = bool(_stt_cfg(snapshot).get("enable_eager_eot"))
+    eager_enabled = False  # Sarvam partials are not reliable eager-EOT signals.
     eager_probe: dict[str, Any] = {}
 
     # Stage-2 speculative LLM (OFF by default). Requires eager events to trigger the
@@ -551,11 +507,11 @@ def _build_pipeline_processors(
         # pulled at finalize so a draft_released set after EOT is captured.
         metrics_observer.set_speculation_marks_provider(spec_controller.drain_marks)
 
+    stt.accept_turn = lambda: input_gate.accepting_turn
     if hasattr(stt, "event_handler"):
-        @stt.event_handler("on_end_of_turn")
-        async def _on_end_of_turn(service: Any, transcript: str) -> None:
+        async def _on_end_of_turn(service: Any, transcript: str) -> bool:
             if not input_gate.accepting_turn:
-                return
+                return False
             now = time.time()
             # Snapshot + clear the eager probe up front so it is consumed on EVERY
             # EndOfTurn (even a no-commit one) and can never bleed into a later turn
@@ -568,22 +524,26 @@ def _build_pipeline_processors(
             if spec_controller is not None:
                 await spec_controller.on_end_of_turn(transcript)
             result = turn_collector.observe(
-                TurnEvent(event_type="end_of_turn", text=transcript, timestamp=utc_now()),
+                TurnEvent(event_type="end_of_turn", text=transcript, timestamp=utc_now(),
+                          metadata={"provider_turn_index": service.provider_turn_index}),
                 phase="task",
                 greeting_pending=False,
             )
             turn = result.turn
             if turn is None:
-                return
-            lstate = get_session_language_state(call_sid) or {}
+                return False
+            if interview is not None and not await interview.accept(
+                f"{call_sid}:{service.provider_turn_index}", _normalize_transcript_text(turn.text)
+            ):
+                return False
             # Per-turn readiness from the actual connect time (tri-state), not the
             # startup early-audio latch which poisoned every later turn (OBS-1).
             stt_ready = _stt_ready_state(service, now)
             logger.info(
-                "Flux end_of_turn",
+                "Sarvam end_of_turn",
                 call_sid=call_sid,
                 turn_id=turn.turn_index,
-                detected_language=lstate.get("last_user_language"),
+                detected_language=service.last_detected_language,
                 stt_ready=stt_ready,
                 transcript=_normalize_transcript_text(turn.text)[:160],
             )
@@ -604,6 +564,10 @@ def _build_pipeline_processors(
             # Language is annotated by the LanguagePrefixProcessor (from the LLM
             # tag) and resolved at metric finalize, so it is not read here.
 
+            return True
+
+        stt.commit_turn = _on_end_of_turn
+
         # Flux turn-boundary events. start/eager/resumed feed the Stage-1 eager
         # probe (timestamps + transcript preview only — no draft, no TTS) and stay
         # DEBUG-logged for diagnostics. They never fire unless eager_eot_threshold
@@ -614,7 +578,7 @@ def _build_pipeline_processors(
             eager_probe.clear()  # new turn boundary
             if spec_controller is not None:
                 await spec_controller.on_turn_start()
-            logger.debug("Flux start_of_turn", call_sid=call_sid)
+            logger.debug("Sarvam start_of_turn", call_sid=call_sid)
 
         @stt.event_handler("on_eager_end_of_turn")
         async def _on_eager_end_of_turn(service: Any, *args: Any) -> None:
@@ -728,6 +692,8 @@ async def run_pipeline(
             stream_sid=stream_sid,
             metrics_observer=metrics_observer,
             on_provider_error=hooks.on_error,
+            interview=hooks.interview,
+            on_interview_finished=hooks.on_interview_finished,
         )
     pipeline = Pipeline(processors)
 
@@ -756,20 +722,10 @@ async def run_pipeline(
     async def _on_client_disconnected(_transport: Any, _client: Any) -> None:
         hooks.on_disconnected()
 
-    stt = next(processor for processor in processors if isinstance(processor, DeepgramFluxSTTService))
+    stt = next(processor for processor in processors if isinstance(processor, SarvamRealtimeSTTService))
 
     async def wait_for_stt() -> None:
-        if isinstance(stt, DeferredConnectDeepgramFluxSTTService):
-            await stt.wait_until_ready()
-        else:
-            # The blocking service emits on_connected only once its socket is open.
-            await stt_ready.wait()
-
-    stt_ready = asyncio.Event()
-
-    @stt.event_handler("on_connected")
-    async def _on_stt_connected(_service: Any) -> None:
-        stt_ready.set()
+        await stt.wait_until_ready()
 
     hooks.on_task(task, wait_for_stt)
 

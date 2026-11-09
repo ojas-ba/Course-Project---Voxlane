@@ -1,8 +1,8 @@
 # Browser Voice Agent
 
-A single-user English/Hindi voice agent in your browser. FastAPI runs Pipecat locally;
+A single-user English, Hindi, Kannada, Marathi, and Telugu voice agent in your browser. FastAPI runs Pipecat locally;
 SmallWebRTC carries microphone audio, speech playback, and UI events.
-Deepgram Flux, Cerebras Qwen 3.8 27B with reasoning disabled, and Cartesia remain server-side providers.
+Sarvam realtime STT, Cerebras Qwen 3.8 27B with reasoning disabled, and Sarvam Bulbul v3 remain server-side providers.
 
 No Exotel account, phone call, public tunnel, React server, or MongoDB is needed.
 
@@ -13,15 +13,19 @@ Use Python 3.11+ and Node 22.14+ for the initial browser build. Node is not need
 1. Create/activate a virtual environment and install the project:
    `python -m pip install -e .`
 2. Copy `.env.example` to `.env` if you do not already have one, and set
-   `DEEPGRAM_API_KEY`, `CEREBRAS_API_KEY`, and `CARTESIA_API_KEY`.
+   `SARVAM_API_KEY` and `CEREBRAS_API_KEY`.
    Refresh existing values locally; never put them in the browser or commit them.
 3. Build the browser assets:
    `npm --prefix frontend ci`
-   then `npm --prefix frontend run build`.
+   then `npm --prefix frontend run prepare:vision`
+   and `npm --prefix frontend run build`.
 4. Run:
    `python -m uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1`
-5. Open [Settings](http://localhost:8000/config), enter your Cartesia voice ID, and save.
+5. Open [Settings](http://localhost:8000/config), review the Sarvam Bulbul v3 voice (default `shubh`), and save.
 6. Open [Talk](http://localhost:8000), click Start, allow the microphone, and enable audio if prompted.
+7. For interview mode, open [Interviews](http://localhost:8000/interviews), draft and
+   review a plan, activate its candidate link, and complete the device checks.
+   See [the interview workflow](docs/INTERVIEWS.md) for camera setup, reports, and recovery.
 
 The agent listens after the greeting and between replies. Headphones help avoid echo.
 End waits for cleanup and reports whether the conversation was saved. If saving takes longer
@@ -42,8 +46,11 @@ Run `python -m pytest -m "not live"` and `npm --prefix frontend test`; rebuild t
 The suite includes a real local WebRTC/RTVI handshake using silence with providers replaced.
 These checks do not establish audible voice quality or perceived latency. A person must validate those in the browser.
 
+The retained live STT tests target Deepgram, not Sarvam.
 Live provider checks are opt-in with `python -m pytest -m live`, after keys and the voice are configured.
 They use API credit and are not a substitute for the human microphone/speaker check.
 
 See [the documentation index](docs/README.md), [architecture](docs/ARCHITECTURE.md),
 [runbook](docs/RUNBOOK.md), and [the implementation plan](docs/BROWSER_IMPLEMENTATION_PLAN.md).
+
+See [Sarvam migration and five-language manual checks](docs/SARVAM_MIGRATION.md).

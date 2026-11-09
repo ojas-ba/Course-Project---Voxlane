@@ -28,7 +28,7 @@ def test_installed_browser_sdk_matches_server_protocol():
 @pytest.mark.asyncio
 async def test_actual_peer_handshake_rtvi_readiness_and_silent_audio():
     config = runtime_config._store.get()
-    config.tts.voice_id = "unused-providers-are-mocked"
+    config.tts.voice_id = "shubh"
     runtime_config._store._config = config
 
     async def protocol_pipeline(*, transport, hooks, **kwargs):

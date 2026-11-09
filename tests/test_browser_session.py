@@ -81,7 +81,7 @@ class Task:
 @pytest.fixture
 def setup_manager(monkeypatch):
     config = runtime_config._store.get()
-    config.tts.voice_id = "test-voice"
+    config.tts.voice_id = "shubh"
     runtime_config._store._config = config
     peer, task, ready = Peer(), Task(), asyncio.Event()
     runs = []
@@ -124,6 +124,29 @@ async def test_greeting_requires_all_readiness_and_only_queues_once(setup_manage
     result = await manager.end(manager._live.call_sid)
     assert result.saved
     assert peer.closed and ACTIVE_SESSIONS == {}
+
+
+@pytest.mark.parametrize("code", ["hi", "kn", "mr", "te"])
+@pytest.mark.asyncio
+async def test_tagged_greeting_sets_language_before_speech_and_saves_no_tags(setup_manager, code):
+    from pipecat.frames.frames import TTSSpeakFrame, TTSUpdateSettingsFrame
+    from app.services.language import to_language_enum
+
+    manager, _peer, task, ready, _runs = setup_manager
+    runtime_config._store._config.prompt.greeting_text = f"<{code}> Hello <{code}> there."
+    await manager.offer(OfferRequest(sdp="offer", type="offer"))
+    call_sid = manager._live.call_sid
+    await task.rtvi.emit("on_client_ready")
+    await task.rtvi.emit("on_client_message", SimpleNamespace(type="ui-ready"))
+    ready.set()
+    await spin_until(lambda: len(task.frames) == 2)
+    assert isinstance(task.frames[0], TTSUpdateSettingsFrame)
+    assert task.frames[0].delta.language == to_language_enum(code)
+    assert isinstance(task.frames[1], TTSSpeakFrame)
+    assert task.frames[1].text == "Hello there."
+    await manager.end(call_sid)
+    saved = await storage.get_call_log(call_sid)
+    assert saved["transcript"][0]["text"] == "Hello there."
 
 
 @pytest.mark.asyncio

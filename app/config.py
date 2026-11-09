@@ -15,9 +15,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True)
     host: str = Field(default="127.0.0.1", alias="HOST")
     port: int = Field(default=8000, alias="PORT", ge=1, le=65535)
-    deepgram_api_key: str = Field(alias="DEEPGRAM_API_KEY", min_length=1, repr=False)
+    deepgram_api_key: str = Field(default="", alias="DEEPGRAM_API_KEY", repr=False)
+    sarvam_api_key: str = Field(alias="SARVAM_API_KEY", min_length=1, repr=False)
     cerebras_api_key: str = Field(alias="CEREBRAS_API_KEY", min_length=1, repr=False)
-    cartesia_api_key: str = Field(alias="CARTESIA_API_KEY", min_length=1, repr=False)
+    cartesia_api_key: str = Field(default="", alias="CARTESIA_API_KEY", repr=False)
 
 
 @lru_cache(maxsize=1)

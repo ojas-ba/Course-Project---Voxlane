@@ -24,23 +24,30 @@ without replacing the active conversation panel.
 flowchart LR
     Browser[Browser] <-->|SmallWebRTC audio/events| Transport
     Transport --> Gate[User audio gate]
-    Gate --> Flux[Deepgram Flux]
-    Flux --> Hint[Language hint]
+    Gate --> STT[Sarvam realtime STT]
+    STT --> Hint[Language hint]
     Hint --> Memory
     Memory --> User[User aggregator]
     User --> LLM[Cerebras Qwen - reasoning disabled]
     LLM --> Prefix[Language prefix]
-    Prefix --> TTS[Cartesia]
+    Prefix --> TTS[Sarvam Bulbul v3]
     TTS --> Output[Transport output]
     Output --> Assistant[Assistant aggregator]
     Output --> Browser
 ```
 
-Flux final transcription/EndOfTurn drives committed turns. The existing turn collector,
-memory, language-prefix processor, and metrics side channels remain intact.
-The LLM emits `<en>` or `<hi>`; the prefix processor switches the TTS language and
-removes the prefix before speech. Settings supports eager EOT telemetry and speculative drafts.
-Drafts are released only after a matching final turn; resumed/mismatched turns fall back to the normal LLM.
+Sarvam realtime uses `saaras:v3-realtime`, `mode=transcribe`, and `language_code=auto`.
+A small STT adapter is needed because Pipecat 1.2.1 ships only the legacy Sarvam STT endpoint.
+`session.begin` establishes readiness; partials are interim frames. Speech start latches mute
+acceptance. Speech end alone does not release a turn: an accepted final commits through the
+existing collector before its finalized transcript and stop frame enter the aggregation path.
+A per-utterance latch rejects duplicate finals before memory or generation. Collector rejection
+also suppresses the transcript frame, so history and replies share the same acceptance decision.
+The LLM emits `<en>`, `<hi>`, `<kn>`, `<mr>`, or `<te>`; the prefix processor sends a typed
+Sarvam TTS language update before streaming tag-free text. The built-in websocket TTS service
+uses stable `bulbul:v3`, voice `shubh` by default, and native 16 kHz linear16 mono output.
+Flux eager EOT and speculative drafts remain in source for historical tooling but are unavailable
+for the Sarvam path; an ordinary partial is never treated as an eager signal.
 The input gate sends silence during bot speech. Rejected transcripts cannot update memory, history,
 or eager drafts. Browser mic gating follows the same no-barge-in policy.
 
@@ -57,7 +64,7 @@ running. Matching active peer IDs renegotiate; unknown IDs and concurrent starts
 
 The browser completes the RTVI handshake and starts playback of the silent remote track.
 It then sends `ui-ready`; blocked playback has an Enable audio button.
-The server waits for media, RTVI, UI, and Flux readiness, then queues the configured greeting once.
+The server waits for media, RTVI, UI, and Sarvam session readiness, then queues the configured greeting once.
 Microphone input stays muted through the greeting. The browser enables input after the first
 greeting speaking-stop callback, respecting the user's Mute selection.
 

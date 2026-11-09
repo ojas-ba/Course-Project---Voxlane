@@ -24,8 +24,33 @@ async def test_normal_generation_has_a_total_deadline_and_no_sdk_retries():
         await asyncio.Event().wait()
 
     with patch.object(CerebrasLLMService, "_process_context", new=stuck):
-        with pytest.raises(TimeoutError):
+        with pytest.raises(TimeoutError, match="Cerebras completion exceeded the configured 0.01-second"):
             await service._process_context(LLMContext(messages=[]))
+
+
+@pytest.mark.asyncio
+async def test_provider_timeout_reason_is_preserved_before_total_deadline():
+    service = _build_llm(build_config_snapshot(get_settings()), get_settings())
+    with patch.object(CerebrasLLMService, "_process_context", new=AsyncMock(side_effect=TimeoutError("socket read timed out"))):
+        with pytest.raises(TimeoutError, match="socket read timed out"):
+            await service._process_context(LLMContext(messages=[]))
+
+
+@pytest.mark.asyncio
+async def test_normal_generation_cancellation_is_not_reported_as_timeout():
+    service = _build_llm(build_config_snapshot(get_settings()), get_settings())
+    entered = asyncio.Event()
+
+    async def stuck(*args):
+        entered.set()
+        await asyncio.Event().wait()
+
+    with patch.object(CerebrasLLMService, "_process_context", new=stuck):
+        running = asyncio.create_task(service._process_context(LLMContext(messages=[])))
+        await entered.wait()
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
 
 
 @pytest.mark.asyncio

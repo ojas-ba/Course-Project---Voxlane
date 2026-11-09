@@ -8,7 +8,7 @@ carries the correct delta type.
 
 from pipecat.frames.frames import TTSUpdateSettingsFrame
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.services.cartesia.tts import CartesiaTTSSettings
+from pipecat.services.sarvam.tts import SarvamTTSSettings
 from pipecat.services.settings import TTSSettings
 from pipecat.transcriptions.language import Language
 
@@ -140,9 +140,9 @@ def test_memory_hot_path_is_synchronous_no_llm():
 
 
 def test_cartesia_language_update_frame_delta_type():
-    frame = TTSUpdateSettingsFrame(delta=CartesiaTTSSettings(language=Language.HI))
+    frame = TTSUpdateSettingsFrame(delta=SarvamTTSSettings(language=Language.HI))
     assert isinstance(frame.delta, TTSSettings)
-    assert isinstance(frame.delta, CartesiaTTSSettings)
+    assert isinstance(frame.delta, SarvamTTSSettings)
     assert frame.delta.language == Language.HI
 
 
@@ -209,7 +209,7 @@ def test_stt_observability_does_not_leak_secrets():
         )
         blob = "".join(captured)
         assert "pen please" in blob                          # transcript IS logged
-        assert get_settings().deepgram_api_key not in blob   # but never the API key
+        assert get_settings().sarvam_api_key not in blob   # but never the API key
     finally:
         logger.remove(sink_id)
         ACTIVE_SESSIONS.pop(call_sid, None)

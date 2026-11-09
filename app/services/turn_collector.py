@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import re
-from typing import Any
+from typing import Any, Literal
 
 from app.models.conversation_models import TurnCollectionResult, TurnEvent, TurnInput
 
@@ -38,7 +38,9 @@ class TurnCollector:
         call_sid: str,
         stream_sid: str | None = None,
         duplicate_window_secs: float = DEFAULT_DUPLICATE_WINDOW_SECS,
+        source: Literal["deepgram_flux_end_of_turn", "pipecat_turn_complete"] = "deepgram_flux_end_of_turn",
     ) -> None:
+        self._source = source
         self._call_sid = call_sid
         self._stream_sid = stream_sid
         self._duplicate_window_secs = duplicate_window_secs
@@ -65,7 +67,7 @@ class TurnCollector:
             return TurnCollectionResult(
                 ignored_reason="greeting_pending",
                 commit_source=(
-                    "deepgram_flux_end_of_turn"
+                    self._source
                     if event.event_type == "end_of_turn"
                     else None
                 ),
@@ -107,7 +109,7 @@ class TurnCollector:
             self._clear_pending_turn()
             return TurnCollectionResult(
                 ignored_reason="empty_text",
-                commit_source="deepgram_flux_end_of_turn",
+                commit_source=self._source,
                 commit_timestamp=commit_timestamp,
                 provider_turn_index=provider_turn_index,
             )
@@ -120,7 +122,7 @@ class TurnCollector:
             self._clear_pending_turn()
             return TurnCollectionResult(
                 ignored_reason="duplicate_turn",
-                commit_source="deepgram_flux_end_of_turn",
+                commit_source=self._source,
                 commit_timestamp=commit_timestamp,
                 provider_turn_index=provider_turn_index,
                 duplicate_suppressed=True,
@@ -134,7 +136,7 @@ class TurnCollector:
             text=text,
             normalized_text=normalized_text,
             phase=phase,
-            source="deepgram_flux_end_of_turn",
+            source=self._source,
             started_at=self._buffered_final_timestamp,
             committed_at=commit_timestamp,
             provider_metadata=provider_metadata,
@@ -145,7 +147,7 @@ class TurnCollector:
         self._clear_pending_turn()
         return TurnCollectionResult(
             turn=turn,
-            commit_source="deepgram_flux_end_of_turn",
+            commit_source=self._source,
             commit_timestamp=commit_timestamp,
             provider_turn_index=provider_turn_index,
         )

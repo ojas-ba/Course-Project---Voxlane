@@ -27,7 +27,33 @@ class Element {
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
-async function page({ denied = false } = {}) {
+test('microphone meter accepts only finite levels in its zero-to-one range', async () => {
+  const { elements, client } = await page();
+  let shown = 0;
+  Object.defineProperty(elements['mic-level'], 'value', {
+    get() { return shown; },
+    set(level) {
+      if (!Number.isFinite(level)) throw new TypeError('Non-finite meter value');
+      shown = level;
+    },
+  });
+  await elements.start.handlers.click();
+  for (const [level, expected] of [
+    [NaN, 0], [Infinity, 0], [-Infinity, 0], [undefined, 0], [null, 0],
+    ['0.5', 0], [-0.3, 0], [1.4, 1], [0.42, 0.42],
+  ]) {
+    assert.doesNotThrow(() => client().callbacks.onLocalAudioLevel(level));
+    assert.equal(shown, expected);
+  }
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ saved: true, history_url: '/calls/saved' }) });
+  elements.end.handlers.click();
+  await settle();
+  client().callbacks.onLocalAudioLevel(0.8);
+  assert.equal(shown, 0); // Old connection callbacks cannot revive the reset meter.
+});
+
+async function page({ denied = false, participation = undefined, connectFailure = false } = {}) {
+  globalThis.interviewParticipation = participation;
   const ids = ['conversation', 'start', 'mute', 'end', 'bot-audio', 'mic-level', 'transcript', 'status', 'error', 'empty', 'audio-enable', 'history', 'history-link', 'retry-save', 'input-device'];
   const elements = Object.fromEntries(ids.map((id) => [id, new Element()]));
   globalThis.document = { getElementById: (id) => elements[id], createElement: () => new Element() };
@@ -38,7 +64,9 @@ async function page({ denied = false } = {}) {
     constructor(options) { current = this; this.callbacks = options.callbacks; this.micChanges = []; this.sent = []; }
     async initDevices() { if (denied) throw new Error('Microphone permission denied'); }
     enableMic(enabled) { this.micChanges.push(enabled); }
-    async connect() {
+    async connect(params) {
+      this.connectParams = params;
+      if (connectFailure) throw new Error('Signaling failed before session announcement');
       this.callbacks.onTrackStarted({ kind: 'audio' }, { local: false });
       this.callbacks.onBotReady();
       this.callbacks.onServerMessage({ type: 'session', call_sid: `browser_${'a'.repeat(32)}` });
@@ -52,6 +80,68 @@ async function page({ denied = false } = {}) {
   await import(`data:text/javascript;base64,${Buffer.from(`${source}\n// case ${moduleId++}`).toString('base64')}`);
   return { elements, client: () => current };
 }
+
+test('candidate connection failure cleans up the scoped runner before receiving a call SID', async () => {
+  let ended = 0; let transports = 0; const requests = [];
+  const headers = new Headers({ Authorization: 'Bearer candidate-token' });
+  const { elements, client } = await page({ connectFailure: true, participation: {
+    sessionId: 'candidate-session', headers, offerEndpoint: '/api/candidate/candidate-session/offer',
+    endEndpoint: '/api/candidate/candidate-session/end',
+    createTransport: () => { transports += 1; return {}; },
+    onEnd: async () => { ended += 1; },
+  } });
+  globalThis.fetch = async (path, options) => {
+    requests.push(path);
+    assert.equal(options.headers, headers);
+    return Response.json({ saved: true, status: 'paused' });
+  };
+  await elements.start.handlers.click(); await settle();
+  assert.deepEqual(requests, ['/api/candidate/candidate-session/end']);
+  assert.equal(transports, 1); assert.equal(ended, 1);
+  assert.equal(client().disconnected, true);
+  assert.equal(elements['retry-save'].hidden, true);
+  assert.equal(elements.history.hidden, true);
+  client().callbacks.onError(new Error('Late callback'));
+  await settle(); assert.equal(requests.length, 1);
+});
+
+test('candidate final monitoring flush completes before the end request', async () => {
+  const order = []; let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const { elements, client } = await page({ participation: {
+    sessionId: 'candidate', endEndpoint: '/api/candidate/candidate/end',
+    beforeEnd: async () => { order.push('flush'); await gate; },
+  } });
+  globalThis.fetch = async () => { order.push('end'); return Response.json({ saved: true }); };
+  await elements.start.handlers.click(); elements.end.handlers.click();
+  assert.deepEqual(order, ['flush']); assert.equal(client().disconnected, undefined);
+  release(); await settle(); await settle();
+  assert.deepEqual(order, ['flush', 'end']); assert.equal(client().disconnected, true);
+});
+
+test('interview participation uses scoped signaling/end, gates thinking, and hides recruiter history', async () => {
+  let ended = 0;
+  const headers = new Headers({ Authorization: 'Bearer candidate-token' });
+  const { elements, client } = await page({ participation: {
+    headers, offerEndpoint: '/api/candidate/session/offer', endEndpoint: '/api/candidate/session/end',
+    beforeStart: async () => true, onEnd: async () => { ended += 1; },
+  } });
+  elements.history.hidden = true;
+  await elements.start.handlers.click(); await settle();
+  assert.equal(client().connectParams.webrtcRequestParams.endpoint, '/api/candidate/session/offer');
+  assert.equal(client().connectParams.webrtcRequestParams.headers.get('Authorization'), 'Bearer candidate-token');
+  client().callbacks.onBotStartedSpeaking(); client().callbacks.onBotStoppedSpeaking();
+  client().callbacks.onUserTranscript({ text: 'My answer', final: true });
+  assert.equal(client().micChanges.at(-1), false);
+  globalThis.fetch = async (path, options) => {
+    assert.equal(path, '/api/candidate/session/end');
+    assert.equal(options.headers.get('Authorization'), 'Bearer candidate-token');
+    return { ok: true, json: async () => ({ saved: true, status: 'paused' }) };
+  };
+  elements.end.handlers.click(); await settle(); await settle();
+  assert.equal(ended, 1); assert.equal(elements.history.hidden, true);
+  assert.equal(elements['retry-save'].hidden, true);
+});
 
 test('input stays muted until greeting completion and readiness is sent once', async () => {
   const { elements, client } = await page();

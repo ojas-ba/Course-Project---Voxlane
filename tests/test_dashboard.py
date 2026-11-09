@@ -12,7 +12,7 @@ from app.runtime import ACTIVE_SESSIONS
 def client():
     ACTIVE_SESSIONS.clear()
     with patch("main.run_local_warmup", new_callable=AsyncMock):
-        with TestClient(app) as test_client:
+        with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 50000)) as test_client:
             yield test_client
     ACTIVE_SESSIONS.clear()
 
@@ -22,15 +22,15 @@ def test_config_page_renders(client):
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "Runtime Configuration" in response.text
-    assert "flux-general-multi" in response.text  # default STT model shown
+    assert "saaras:v3-realtime" in response.text  # default STT model shown
     assert "Place outbound call" not in response.text
     # Grouped sections + new editable fields with helper text.
-    assert "Defer connect on start" in response.text
+    assert "Sarvam realtime" in response.text
     assert "Memory" in response.text
-    assert "EOT timeout (ms)" in response.text
-    assert "Turn stop debounce timeout" in response.text  # LAT-2 configurable debounce
-    assert "Enable eager EOT" in response.text
-    assert "Enable speculative LLM" in response.text
+    assert "End-of-speech silence (ms)" in response.text
+    assert "Post-STT debounce (ms)" in response.text  # LAT-2 configurable debounce
+    assert "Flux eager EOT is unavailable" in response.text
+    assert "Speculative generation is unavailable with Sarvam" in response.text
 
 
 def test_root_renders_browser(client):
@@ -48,7 +48,7 @@ def test_config_save(client):
         response = client.post(
             "/config",
             data={
-                "stt_model": "flux-general-multi",
+                "stt_model": "saaras:v3-realtime",
                 "stt_language_hints": "en, hi",
                 "stt_eot_threshold": "0.65",
                 "stt_eot_timeout_ms": "700",
@@ -57,8 +57,8 @@ def test_config_save(client):
                 "llm_temperature": "0.7",
                 "llm_max_tokens": "160",
                 "llm_request_timeout_seconds": "10",
-                "tts_model": "sonic-3.5",
-                "tts_voice_id": "voice-x",
+                "tts_model": "bulbul:v3",
+                "tts_voice_id": "ritu",
                 "tts_language_mode": "per_turn",
                 "system_prompt": "Be helpful.",
                 "greeting_text": "Say hi.",
@@ -69,25 +69,23 @@ def test_config_save(client):
     assert mock_save.await_count == 1
     # The saved config passed to save_runtime_config reflects the edits.
     saved = mock_save.call_args.args[0]
-    assert saved.tts.voice_id == "voice-x"
+    assert saved.tts.voice_id == "ritu"
     assert saved.prompt.system_prompt == "Be helpful."
 
 
-def test_eager_and_speculation_settings_roundtrip_and_invalid_combinations_fail(client):
-    values = {"stt_enable_eager_eot": "true", "stt_eager_eot_threshold": "0.5",
-              "llm_enable_speculative_llm": "true", "llm_model": "gpt-oss-120b",
-              "llm_reasoning_effort": "low", "llm_max_tokens": "1024"}
+def test_sarvam_vad_settings_roundtrip_and_speculation_unavailable(client):
+    values = {"stt_language_code": "kn-IN", "stt_silence_duration_ms": "850",
+              "stt_threshold": "0.4", "tts_pace": "1.2"}
     assert client.post("/config", data=values).status_code == 200
     from app.services.runtime_config import get_cached_runtime_config
     config = get_cached_runtime_config()
-    assert config.stt.enable_eager_eot and config.stt.eager_eot_threshold == 0.5
-    assert config.llm.enable_speculative_llm and config.llm.model == "gpt-oss-120b"
-    assert client.post("/config", data={"stt_enable_eager_eot": "false"}).status_code == 422
-    assert client.post("/config", data={"stt_eager_eot_threshold": "0.9"}).status_code == 422
-    assert client.post("/config", data={"stt_eager_eot_threshold": ""}).status_code == 422
-    assert client.post("/config", data={"llm_enable_speculative_llm": "false",
-                                     "stt_enable_eager_eot": "false",
-                                     "stt_eager_eot_threshold": ""}).status_code == 200
+    assert config.stt.language_code == "kn-IN" and config.stt.silence_duration_ms == 850
+    assert config.stt.threshold == 0.4 and config.tts.pace == 1.2
+    assert client.post("/config", data={"llm_enable_speculative_llm": "true"}).status_code == 422
+    assert client.post("/config", data={"stt_enable_eager_eot": "true"}).status_code == 422
+    assert client.post("/config", data={"stt_language_code": "xx-IN"}).status_code == 422
+    assert client.post("/config", data={"tts_voice_id": "cartesia-uuid"}).status_code == 422
+    assert client.post("/config", data={"tts_min_buffer_size": "20"}).status_code == 422
 
 
 def test_calls_list_renders(client):

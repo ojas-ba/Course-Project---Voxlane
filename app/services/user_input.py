@@ -21,7 +21,7 @@ class UserInputGate(FrameProcessor):
         return not self.muted and self.turn_allowed
 
     def set_muted(self, muted: bool) -> None:
-        """Latch rejected speech until Flux starts a fresh turn after unmuting."""
+        """Latch rejected speech until the provider starts a fresh turn after unmuting."""
         self.muted = muted
         if muted:
             self.turn_allowed = False

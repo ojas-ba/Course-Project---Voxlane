@@ -34,17 +34,16 @@ async def test_rejected_turn_does_not_update_language_memory_history_or_eager_dr
     snapshot["runtime_config"]["llm"]["enable_speculative_llm"] = True
     procs = _build_pipeline_processors(transport=MagicMock(), snapshot=snapshot,
         settings=get_settings(), call_sid="muted-test", stream_sid="s", metrics_observer=TurnMetricsObserver(on_record=lambda r: None))
-    gate, stt, hints, user, spec = procs[1], procs[2], procs[3], procs[5], procs[6]
+    gate, stt, hints, user = procs[1], procs[2], procs[3], procs[5]
     hints.push_frame = AsyncMock()
-    spec._controller.on_eager = AsyncMock()
     await stt._call_event_handler("on_start_of_turn")
     await asyncio.sleep(0)
     await stt._call_event_handler("on_eager_end_of_turn", "speaker echo")
-    await stt._call_event_handler("on_end_of_turn", "speaker echo")
+    await stt.commit_turn(stt, "speaker echo")
     frame = TranscriptionFrame("speaker echo", "u", "now", finalized=True)
     await hints.process_frame(frame)
     hints.push_frame.assert_not_awaited()
-    spec._controller.on_eager.assert_not_awaited()
+    assert len(procs) == 11
     assert "muted-test" not in ACTIVE_SESSIONS
     await user._call_event_handler("on_user_mute_stopped")
     await asyncio.sleep(0)

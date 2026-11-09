@@ -70,7 +70,7 @@ def _salient_tokens(text: str) -> set[str]:
     a Hindi word like "हिंदी" into single base consonants and drop them. With the
     range, Hindi/Hinglish text tokenizes whole, the same as English.
     """
-    toks = re.findall(r"[\wऀ-ॿ']+", (text or "").lower())
+    toks = re.findall(r"[\w\u0900-\u097F\u0C00-\u0CFF']+", (text or "").lower())
     return {t for t in toks if (t.isdigit() or len(t) >= 3) and t not in _STOPWORDS}
 
 

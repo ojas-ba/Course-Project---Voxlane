@@ -51,7 +51,7 @@ def mock_env_vars(request):
 
     monkeypatch = request.getfixturevalue("monkeypatch")
     temporary = request.getfixturevalue("tmp_path")
-    for key, value in {"DEEPGRAM_API_KEY": "test_dg", "CEREBRAS_API_KEY": "test_cb", "CARTESIA_API_KEY": "test_ct"}.items():
+    for key, value in {"SARVAM_API_KEY": "test_sarvam", "DEEPGRAM_API_KEY": "test_dg", "CEREBRAS_API_KEY": "test_cb", "CARTESIA_API_KEY": "test_ct"}.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(storage, "DATA_DIR", temporary / "data")
     store = ConfigStore()

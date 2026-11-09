@@ -38,14 +38,16 @@ def _parse_config_form(form: Any, base: RuntimeConfig) -> RuntimeConfig:
     """Parse posted fields strictly; Pydantic owns coercion and validation."""
     data = base.model_dump(mode="json")
     fields = {
-        "stt": {"model": "stt_model", "eot_threshold": "stt_eot_threshold",
-                "eot_timeout_ms": "stt_eot_timeout_ms", "turn_stop_timeout_ms": "stt_turn_stop_timeout_ms",
-                "defer_connect_on_start": "stt_defer_connect_on_start",
-                "enable_eager_eot": "stt_enable_eager_eot"},
+        "stt": {"model": "stt_model", "enable_eager_eot": "stt_enable_eager_eot", "language_code": "stt_language_code",
+                "stream_type": "stt_stream_type", "threshold": "stt_threshold",
+                "silence_duration_ms": "stt_silence_duration_ms",
+                "min_speech_duration_ms": "stt_min_speech_duration_ms",
+                "turn_stop_timeout_ms": "stt_turn_stop_timeout_ms"},
         "llm": {"model": "llm_model", "temperature": "llm_temperature", "max_tokens": "llm_max_tokens",
                 "reasoning_effort": "llm_reasoning_effort", "request_timeout_seconds": "llm_request_timeout_seconds",
                 "enable_speculative_llm": "llm_enable_speculative_llm"},
-        "tts": {"model": "tts_model", "voice_id": "tts_voice_id"},
+        "tts": {"model": "tts_model", "voice_id": "tts_voice_id", "pace": "tts_pace",
+                "temperature": "tts_temperature", "min_buffer_size": "tts_min_buffer_size"},
         "prompt": {"system_prompt": "system_prompt", "greeting_text": "greeting_text"},
         "memory": {"recent_turn_pairs": "mem_recent_turn_pairs",
                    "enable_running_summary_after_turn": "mem_enable_running_summary_after_turn",
@@ -57,11 +59,8 @@ def _parse_config_form(form: Any, base: RuntimeConfig) -> RuntimeConfig:
     for group, mapping in fields.items():
         for key, field in mapping.items():
             if field in form:
-                data[group][key] = str(form[field]).strip()
-    if "stt_language_hints" in form:
-        data["stt"]["language_hints"] = [h.strip() for h in str(form["stt_language_hints"]).split(",") if h.strip()]
-    if "stt_eager_eot_threshold" in form:
-        data["stt"]["eager_eot_threshold"] = str(form["stt_eager_eot_threshold"]).strip() or None
+                value = str(form[field]).strip()
+                data[group][key] = False if key == "enable_eager_eot" and value.lower() == "false" else value
     return RuntimeConfig.model_validate(data)
 
 

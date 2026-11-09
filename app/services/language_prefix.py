@@ -1,15 +1,15 @@
-"""Stream the LLM's ``<en>``/``<hi>`` language tag into Cartesia routing.
+"""Stream the LLM's ``<en>``/``<hi>`` language tag into Sarvam routing.
 
 The main Cerebras reply starts with a tiny tag the model chooses, e.g.::
 
     <en> Sure, I'll continue in English. What would you like to discuss?
     <hi> Haan bilkul, batao kya help chahiye?
 
-This processor sits between the LLM and Cartesia TTS. It:
+This processor sits between the LLM and Sarvam TTS. It:
 
   1. Buffers only the first few characters until it can read the tag (which may
      be split across LLM text frames).
-  2. Sets Cartesia's language (``TTSUpdateSettingsFrame``) *before* any spoken
+  2. Sets Sarvam's language (``TTSUpdateSettingsFrame``) *before* any spoken
      text is forwarded.
   3. Strips the tag and streams the remaining text straight to TTS — streaming
      is preserved; there is no full-response buffering.
@@ -47,7 +47,7 @@ from pipecat.frames.frames import (
     TTSUpdateSettingsFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.services.cartesia.tts import CartesiaTTSSettings
+from pipecat.services.sarvam.tts import SarvamTTSSettings
 
 from app.runtime import get_session_language_state, set_session_language_state
 from app.services.language import (
@@ -70,11 +70,17 @@ _PREFIX_ERROR_STAGE = "language_prefix_parse"
 # turns as a prefix problem.
 _NO_OUTPUT_ERROR_STAGE = "llm_no_output"
 # Spoken only when a malformed/empty reply leaves nothing safe to say.
-_SAFE_REPEAT_LINE = "Sorry, could you repeat that?"
+_SAFE_REPEAT_LINES = {
+    "en": "Sorry, could you repeat that?",
+    "hi": "माफ़ कीजिए, क्या आप दोहरा सकते हैं?",
+    "kn": "ಕ್ಷಮಿಸಿ, ಮತ್ತೊಮ್ಮೆ ಹೇಳುತ್ತೀರಾ?",
+    "mr": "माफ करा, तुम्ही पुन्हा सांगाल का?",
+    "te": "క్షమించండి, మళ్లీ చెబుతారా?",
+}
 
 
 class LanguagePrefixProcessor(FrameProcessor):
-    """Parse the LLM ``<en>``/``<hi>`` prefix and route Cartesia language."""
+    """Parse the LLM ``<en>``/``<hi>`` prefix and route Sarvam language."""
 
     def __init__(
         self,
@@ -161,8 +167,9 @@ class LanguagePrefixProcessor(FrameProcessor):
                 spoken = recovered
         if not spoken:
             # Only now — the model genuinely produced nothing usable.
-            await self._push_spoken_text(_SAFE_REPEAT_LINE, direction)
-            spoken = _SAFE_REPEAT_LINE
+            language = fallback_response_language(get_session_language_state(self._call_sid))
+            spoken = _SAFE_REPEAT_LINES[language]
+            await self._push_spoken_text(spoken, direction)
 
         if self._metrics is not None:
             # Record the error BEFORE the assistant text: note_assistant_text is
@@ -182,7 +189,7 @@ class LanguagePrefixProcessor(FrameProcessor):
                     message = "LLM produced no output (empty reply — e.g. provider rate limit/timeout); spoke a safe fallback line."
                 else:
                     stage = _PREFIX_ERROR_STAGE
-                    message = "LLM reply missing/malformed <en>/<hi> tag; used fallback language."
+                    message = "LLM reply missing/malformed language tag; used fallback language."
                 self._metrics.note_error(stage=stage, message=message)
             # Defensive: never persist a control tag even if streaming missed one.
             self._metrics.note_assistant_text(sanitize_language_control_tags(spoken))
@@ -202,7 +209,7 @@ class LanguagePrefixProcessor(FrameProcessor):
     async def _apply_language(self, language: str, direction: FrameDirection) -> None:
         state = get_session_language_state(self._call_sid) or new_language_state()
         record_response_language(state, language)
-        # Only switch Cartesia when the language actually changes. The first
+        # Only switch Sarvam when the language actually changes. The first
         # response always emits (last_tts_language is unset); thereafter a repeat
         # of the same language is a no-op, avoiding per-turn TTS context churn.
         changed = state.get("last_tts_language") != language
@@ -213,7 +220,7 @@ class LanguagePrefixProcessor(FrameProcessor):
             enum = to_language_enum(language)
             if enum is not None:
                 await self.push_frame(
-                    TTSUpdateSettingsFrame(delta=CartesiaTTSSettings(language=enum)), direction
+                    TTSUpdateSettingsFrame(delta=SarvamTTSSettings(language=enum)), direction
                 )
         if self._metrics is not None:
             self._metrics.note_language(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 
 
@@ -23,55 +23,15 @@ class RuntimeModel(BaseModel):
 
 
 class STTCfg(RuntimeModel):
-    """Flux audio and turn boundary settings."""
-    model: Literal["flux-general-multi", "flux-general-en"] = "flux-general-multi"
-    language_hints: list[str] = Field(default_factory=lambda: ["en", "hi"])
-    eot_threshold: float = Field(default=0.65, ge=0.5, le=1.0)
-    eot_timeout_ms: int = Field(default=700, ge=500, le=60000)
-    # Overlap Flux connection with browser setup; the greeting still waits for readiness.
-    defer_connect_on_start: bool = True
-    # Pipecat's POST-STT user-turn debounce before the LLM fires — NOT Deepgram
-    # endpointing (that is eot_timeout_ms). Pipecat's ExternalUserTurnStopStrategy
-    # default is 500ms; because UserStoppedSpeakingFrame (a SystemFrame) overtakes
-    # the queued finalized TranscriptionFrame, the immediate trigger misses and
-    # THIS timeout can fire the turn. Measure frame ordering rather than assuming
-    # an identical delay on every turn. Default 500 preserves existing tuning;
-    # lower = less latency
-    # but too low risks splitting a turn whose final transcript arrives in pieces.
+    """Sarvam realtime transcription and server VAD settings."""
+    model: Literal["saaras:v3-realtime"] = "saaras:v3-realtime"
+    language_code: Literal["auto", "en-IN", "hi-IN", "kn-IN", "mr-IN", "te-IN"] = "auto"
+    stream_type: Literal["fast", "balanced"] = "fast"
+    threshold: float = Field(default=0.3, ge=0, le=1)
+    silence_duration_ms: int = Field(default=700, ge=100, le=5000)
+    min_speech_duration_ms: int = Field(default=250, ge=0, le=2000)
     turn_stop_timeout_ms: int = Field(default=500, ge=100, le=1000)
-    # --- EagerEndOfTurn telemetry (Stage 1; OFF by default — no behavior change) ---
-    # When enabled, Deepgram Flux is asked with this threshold and begins emitting
-    # EagerEndOfTurn/TurnResumed events. Stage 1 ONLY measures the would-be LLM head
-    # start; it never starts a speculative draft and never speaks early. The Flux
-    # rule is eager_eot_threshold <= eot_threshold. None = not sent (eager off).
-    enable_eager_eot: bool = False
-    eager_eot_threshold: float | None = Field(default=None, ge=0.3, le=0.9)
-
-    @field_validator("language_hints")
-    @classmethod
-    def supported_hints(cls, hints: list[str]) -> list[str]:
-        """Validate the language codes supported by Flux Multilingual."""
-        supported = {"en", "es", "fr", "de", "hi", "ru", "pt", "ja", "it", "nl"}
-        if any(h not in supported for h in hints):
-            raise ValueError("Unsupported Flux language hint")
-        return list(dict.fromkeys(hints))
-
-    @model_validator(mode="after")
-    def _validate_eager_threshold(self) -> "STTCfg":
-        # Only constrains when eager is actually enabled, so it is a no-op for the
-        # disabled default and for all existing stored configs.
-        if self.enable_eager_eot:
-            if self.eager_eot_threshold is None:
-                # Without a threshold the feature would silently collect nothing
-                # (Flux is never asked for eager events) — surface that as a save
-                # error instead of a config that looks on but does nothing.
-                raise ValueError("eager_eot_threshold is required when enable_eager_eot is true")
-            if self.eager_eot_threshold > self.eot_threshold:
-                raise ValueError(
-                    "eager_eot_threshold must be <= eot_threshold "
-                    f"(got {self.eager_eot_threshold} > {self.eot_threshold})"
-                )
-        return self
+    enable_eager_eot: Literal[False] = False
 
 
 class LLMCfg(RuntimeModel):
@@ -93,11 +53,27 @@ class LLMCfg(RuntimeModel):
 
 
 class TTSCfg(RuntimeModel):
-    """Cartesia model and user-selected voice."""
-    provider: Literal["cartesia"] = "cartesia"
-    model: str = Field(default="sonic-3.6-2026-08-27", min_length=1)
-    voice_id: str = ""
+    """Stable Bulbul streaming model with multilingual voices."""
+    provider: Literal["sarvam"] = "sarvam"
+    model: Literal["bulbul:v3"] = "bulbul:v3"
+    voice_id: Literal["shubh", "aditya", "ritu", "priya", "neha", "rahul", "pooja", "rohan", "simran", "kavya", "amit", "dev", "ishita", "shreya", "ratan", "varun", "manan", "sumit", "roopa", "kabir", "aayan", "ashutosh", "advait"] = "shubh"
     language_mode: Literal["per_turn"] = "per_turn"
+    pace: float = Field(default=1.0, ge=0.5, le=2)
+    temperature: float = Field(default=0.6, ge=0.01, le=1)
+    min_buffer_size: int = Field(default=30, ge=30, le=100)
+
+    @field_validator("min_buffer_size", mode="before")
+    @classmethod
+    def migrate_saved_buffer(cls, value: object, info: ValidationInfo) -> object:
+        """Upgrade formerly valid saved buffers without accepting invalid UI edits."""
+        if (
+            (info.context or {}).get("migrate_saved_config")
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and 1 <= value < 30
+        ):
+            return 30
+        return value
 
 
 class PromptCfg(RuntimeModel):
@@ -144,11 +120,31 @@ class RuntimeConfig(RuntimeModel):
     memory: MemoryCfg = Field(default_factory=MemoryCfg)
     ops: OpsCfg = Field(default_factory=OpsCfg)
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_speech(cls, value: object) -> object:
+        """Translate only identifiable old speech configs; preserve all other tuning."""
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        stt = value.get("stt", {})
+        tts = value.get("tts", {})
+        legacy = isinstance(stt, dict) and str(stt.get("model", "")).startswith("flux-general-")
+        if legacy:
+            value["stt"] = {
+                "turn_stop_timeout_ms": stt.get("turn_stop_timeout_ms", 500),
+                "silence_duration_ms": min(5000, stt.get("eot_timeout_ms", 700)),
+            }
+            value["llm"] = {**value.get("llm", {}), "enable_speculative_llm": False}
+        if isinstance(tts, dict) and (tts.get("provider") == "cartesia" or str(tts.get("model", "")).startswith("sonic")):
+            value["tts"] = TTSCfg().model_dump()
+        return value
+
     @model_validator(mode="after")
     def validate_browser_config(self) -> "RuntimeConfig":
         """Validate dependencies between generation and turn-boundary settings."""
-        if self.llm.enable_speculative_llm and not self.stt.enable_eager_eot:
-            raise ValueError("Speculative LLM requires enable_eager_eot")
+        if self.llm.enable_speculative_llm:
+            raise ValueError("Speculative LLM is unavailable with Sarvam realtime STT")
         if self.llm.model == "gpt-oss-120b" and self.llm.reasoning_effort == "none":
             raise ValueError("GPT-OSS reasoning_effort must be low, medium, or high")
         if not self.prompt.greeting_text.strip() or not self.prompt.system_prompt.strip():

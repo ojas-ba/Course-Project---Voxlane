@@ -18,8 +18,17 @@ class VoiceCerebrasLLMService(CerebrasLLMService):
         self._client = self._client.with_options(timeout=request_timeout_seconds, max_retries=0)
 
     async def _process_context(self, context: LLMContext) -> None:
-        async with asyncio.timeout(self.request_timeout_seconds):
-            await super()._process_context(context)
+        deadline = asyncio.timeout(self.request_timeout_seconds)
+        try:
+            async with deadline:
+                await super()._process_context(context)
+        except TimeoutError as exc:
+            if not deadline.expired():
+                raise
+            raise TimeoutError(
+                "Cerebras completion exceeded the configured "
+                f"{self.request_timeout_seconds:g}-second total request timeout."
+            ) from exc
 
     async def stream_draft(self, messages: list[dict[str, Any]]) -> AsyncIterator[Any]:
         """Use the same settings and deadline as the normal in-pipeline response."""

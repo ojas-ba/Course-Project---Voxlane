@@ -71,7 +71,7 @@ class MetricsCollector(FrameProcessor):
 @pytest.mark.live
 @pytest.mark.asyncio
 async def test_live_tts_metrics():
-    """Test Cartesia TTS API and measure synthesis metrics in isolation."""
+    """Test Sarvam streaming TTS API and measure synthesis metrics in isolation."""
     settings = get_settings()
     snapshot = build_effective_snapshot(await load_runtime_config(settings))
     assert snapshot["TTS_VOICE_ID"], "Choose a voice in /config before running this live check"
@@ -84,7 +84,7 @@ async def test_live_tts_metrics():
     collector = MetricsCollector()
     
     pipeline = Pipeline([source, tts, collector])
-    task = PipelineTask(pipeline, params=PipelineParams(allow_interruptions=False))
+    task = PipelineTask(pipeline, params=PipelineParams(audio_in_sample_rate=16000, audio_out_sample_rate=16000))
     runner = PipelineRunner()
     
     print("\n--- Running Isolated Live TTS Test ---")

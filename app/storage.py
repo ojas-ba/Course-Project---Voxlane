@@ -65,7 +65,10 @@ async def read_config() -> RuntimeConfig | None:
     """Read existing settings; only a missing file means first-run defaults."""
     def read() -> RuntimeConfig | None:
         try:
-            return RuntimeConfig.model_validate_json((DATA_DIR / "runtime_config.json").read_text(encoding="utf-8"))
+            return RuntimeConfig.model_validate_json(
+                (DATA_DIR / "runtime_config.json").read_text(encoding="utf-8"),
+                context={"migrate_saved_config": True},
+            )
         except FileNotFoundError:
             return None
     return await asyncio.to_thread(read)

@@ -7,18 +7,20 @@ import pytest
 
 from app.config import get_settings
 from app.runtime import build_config_snapshot
-from app.services.pipecat_pipeline import _build_llm, _build_stt
+from app.services.pipecat_pipeline import _build_llm
 from main import app
 
 
 @pytest.fixture
 def client():
     with patch("main.run_local_warmup", new=AsyncMock()):
-        with TestClient(app) as client:
+        with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 50000)) as client:
             yield client
 
 
 def test_start_requires_voice_before_any_connection(client):
+    from app.services import runtime_config
+    runtime_config._store._config.tts.voice_id = ""
     with patch("app.services.browser_session.SmallWebRTCConnection") as peer:
         response = client.post("/api/offer", json={"sdp": "offer", "type": "offer"})
     assert response.status_code == 409
@@ -35,14 +37,14 @@ def test_invalid_offer_and_unknown_peer(client):
 def test_config_validation_is_not_silently_ignored(client):
     assert client.post("/config", data={"llm_max_tokens": "broken"}).status_code == 422
     assert client.post("/config", data={"llm_model": "gpt-oss-120b", "llm_reasoning_effort": "none"}).status_code == 422
-    response = client.post("/config", data={"tts_voice_id": "voice-x", "greeting_text": "Good morning."})
+    response = client.post("/config", data={"tts_voice_id": "ritu", "greeting_text": "Good morning."})
     assert response.status_code == 200
     assert "Good morning." in client.get("/config").text
 
 
 def test_config_write_failure_and_cross_origin_mutation(client):
     with patch("app.storage.write_config", new=AsyncMock(side_effect=OSError("full"))):
-        assert client.post("/config", data={"tts_voice_id": "new"}).status_code == 503
+        assert client.post("/config", data={"tts_voice_id": "priya"}).status_code == 503
     assert client.post("/config", data={}, headers={"origin": "https://another.example"}).status_code == 403
 
 
@@ -68,10 +70,10 @@ def test_cerebras_wire_request_has_completion_cap_and_reasoning():
     assert "max_tokens" not in params
 
 
-def test_flux_wire_request_contains_correct_hint_names():
-    service = _build_stt(build_config_snapshot(get_settings()), get_settings())
-    query = service._build_query_string()
-    assert "model=flux-general-multi" in query
-    assert "encoding=linear16" in query
-    assert "language_hint=en" in query and "language_hint=hi" in query
-    assert "language_hints=" not in query
+def test_sarvam_settings_show_five_languages_without_credentials(client):
+    page = client.get("/config").text
+    assert "saaras:v3-realtime" in page and "bulbul:v3" in page
+    for code in ["en-IN", "hi-IN", "kn-IN", "mr-IN", "te-IN"]:
+        assert code in page
+    assert get_settings().sarvam_api_key not in page
+    assert "stt_enable_eager_eot" not in page and "llm_enable_speculative_llm" not in page

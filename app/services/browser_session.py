@@ -12,7 +12,8 @@ from uuid import uuid4
 from aiortc.sdp import candidate_from_sdp
 from fastapi import HTTPException
 from loguru import logger
-from pipecat.frames.frames import TTSSpeakFrame
+from pipecat.frames.frames import TTSSpeakFrame, TTSUpdateSettingsFrame
+from pipecat.services.sarvam.tts import SarvamTTSService
 from pipecat.pipeline.task import PipelineTask
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pydantic import ValidationError
@@ -20,13 +21,16 @@ from pydantic import ValidationError
 from app.config import Settings
 from app.models.browser_models import AudioDiagnostics, CandidateRequest, EndResult, OfferRequest
 from app.models.schemas import CallLog
-from app.runtime import ConfigSnapshot, create_session, delete_session, get_session, update_session_metric
-from app.services.language import strip_language_prefix_tag
+from app.runtime import ConfigSnapshot, append_session_transcript_event, create_session, delete_session, get_session, update_session_metric
+from app.services.language import (
+    sanitize_language_control_tags, to_language_enum, try_parse_language_prefix,
+)
 from app.services.pipecat_pipeline import PipelineExecutionResult, PipelineHooks, _record_greeting, run_pipeline
 from app.services.runtime_config import build_effective_snapshot, get_cached_runtime_config
 from app.services.transport_factory import build_browser_transport
 from app import storage
 from app.utils.metrics_logger import finalize_call_log
+from app.interviews.service import InterviewBinding
 
 
 @dataclass
@@ -52,6 +56,8 @@ class _LiveSession:
     disconnected: bool = False
     stopping: bool = False
     greeting_queued: bool = False
+    interview: InterviewBinding | None = None
+    interview_deadline: asyncio.Task[None] | None = None
 
 
 class BrowserSessionManager:
@@ -71,12 +77,13 @@ class BrowserSessionManager:
         self._live: _LiveSession | None = None
         self._last_result: EndResult | None = None
         self._pending_logs: dict[str, CallLog] = {}
+        self._pending_interviews: dict[str, InterviewBinding] = {}
         self._save_lock = asyncio.Lock()
         self._save_tasks: dict[str, asyncio.Task[EndResult]] = {}
         self._closing = False
         self._stuck = False
 
-    async def offer(self, request: OfferRequest) -> dict[str, str]:
+    async def offer(self, request: OfferRequest, *, interview: InterviewBinding | None = None) -> dict[str, str]:
         """Reserve before initialization; retain every task that can outlive HTTP."""
         async with self._lock:
             if self._closing or self._stuck:
@@ -85,6 +92,8 @@ class BrowserSessionManager:
             if request.pc_id:
                 if live is None or request.pc_id != live.connection.pc_id:
                     raise HTTPException(404, "Unknown peer connection")
+                if (live.interview.id if live.interview else None) != (interview.id if interview else None):
+                    raise HTTPException(403, "Peer connection belongs to a different participation scope")
                 if live.stopping:
                     raise HTTPException(409, "Conversation is stopping")
                 existing = True
@@ -100,6 +109,16 @@ class BrowserSessionManager:
                 snapshot = cast(ConfigSnapshot, build_effective_snapshot(config))
                 live = _LiveSession(self._connection_factory(), call_sid, stream_sid, snapshot,
                                     time.monotonic() + config.ops.browser_ready_timeout_secs)
+                if interview is not None:
+                    live.interview = interview
+                    try:
+                        await interview.start(call_sid, snapshot)
+                    except HTTPException as exc:
+                        await interview.stop(str(exc.detail))
+                        raise
+                    except Exception:
+                        await interview.stop("Interview setup interrupted")
+                        raise
                 self._live = live
                 create_session(call_sid, stream_sid, self._settings, config_snapshot=snapshot)
                 self._register_connection(live)
@@ -144,8 +163,17 @@ class BrowserSessionManager:
         except (ValueError, AssertionError, IndexError):
             raise HTTPException(422, "Invalid ICE candidate") from None
 
+    def owns_interview(self, identity: str, pc_id: str) -> bool:
+        """Check scoped signaling without exposing live transport objects."""
+        live = self._live
+        return bool(live and live.interview and live.interview.id == identity and live.connection.pc_id == pc_id)
+
     async def end(self, call_sid: str) -> EndResult:
         """Join retained cleanup or retry a finalized log without finalizing twice."""
+        if call_sid in self._pending_interviews:
+            if not await self._retry_interview_checkpoint(call_sid):
+                return EndResult(call_sid=call_sid, saved=False,
+                    error="Interview checkpoint could not be saved. Retry saving after fixing local storage.")
         if call_sid in self._pending_logs:
             return await self._save_finalized(call_sid)
         if self._last_result is not None and self._last_result.call_sid == call_sid:
@@ -169,6 +197,23 @@ class BrowserSessionManager:
             await asyncio.shield(self._request_stop(self._live, error="Application stopped"))
         for call_sid in list(self._pending_logs):
             await self._save_finalized(call_sid)
+        for call_sid in list(self._pending_interviews):
+            await self._retry_interview_checkpoint(call_sid)
+
+    async def _retry_interview_checkpoint(self, call_sid: str) -> bool:
+        binding = self._pending_interviews.get(call_sid)
+        if binding is None:
+            return True
+        try:
+            await binding.stop("Interview checkpoint write was interrupted")
+        except Exception:
+            logger.exception("Interview checkpoint retry failed", call_sid=call_sid)
+            return False
+        self._pending_interviews.pop(call_sid, None)
+        if (self._last_result is not None and self._last_result.call_sid == call_sid
+                and self._last_result.error == "Interview checkpoint could not be saved"):
+            self._last_result = self._last_result.model_copy(update={"error": None})
+        return True
 
     def _register_connection(self, live: _LiveSession) -> None:
         @live.connection.event_handler("closed")
@@ -200,6 +245,8 @@ class BrowserSessionManager:
                 on_connected=live.media_ready.set,
                 on_disconnected=disconnected,
                 on_error=provider_error,
+                interview=live.interview,
+                on_interview_finished=lambda: self._request_stop(live),
             )
             live.result = await self._pipeline(
                 transport=build_browser_transport(live.connection), call_sid=live.call_sid,
@@ -251,14 +298,22 @@ class BrowserSessionManager:
             if live.stopping:
                 return
             assert live.task is not None
-            text = strip_language_prefix_tag(live.snapshot["GREETING_TEXT"]).strip()
+            configured_text = live.snapshot["GREETING_TEXT"]
+            greeting_language, _, _ = try_parse_language_prefix(configured_text)
+            text = sanitize_language_control_tags(configured_text)
             if not text:
                 raise RuntimeError("Opening greeting is empty")
             live.greeting_queued = True
             _record_greeting(call_sid=live.call_sid, greeting_text=text)
             update_session_metric(live.call_sid, "greeting_text_source", "configured_text")
             update_session_metric(live.call_sid, "first_tts_frame_queued_at", time.time())
+            if greeting_language is not None:
+                await live.task.queue_frame(TTSUpdateSettingsFrame(
+                    delta=SarvamTTSService.Settings(language=to_language_enum(greeting_language))
+                ))
             await live.task.queue_frame(TTSSpeakFrame(text, append_to_context=True))
+            if live.interview is not None:
+                live.interview_deadline = asyncio.create_task(self._watch_interview_time(live))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -268,6 +323,25 @@ class BrowserSessionManager:
         await asyncio.sleep(max(0, live.deadline - time.monotonic()))
         if not live.greeting_queued:
             self._request_stop(live, error="Browser or speech provider readiness timed out")
+
+    async def _watch_interview_time(self, live: _LiveSession) -> None:
+        """Bound silent interviews using the same retained cancellation lifecycle."""
+        assert live.interview is not None and live.task is not None
+        try:
+            await asyncio.sleep(await live.interview.remaining())
+            while not live.stopping:
+                closing = await live.interview.expire_if_idle()
+                if closing:
+                    text = sanitize_language_control_tags(closing)
+                    append_session_transcript_event(live.call_sid, role="assistant", phase="task", text=text)
+                    await live.task.queue_frame(TTSSpeakFrame(text, append_to_context=True))
+                    return
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Interview deadline checkpoint failed", call_sid=live.call_sid)
+            self._request_stop(live, error="Interview deadline checkpoint failed")
 
     def _request_stop(self, live: _LiveSession, *, error: str | None = None,
                       disconnected: bool = False) -> asyncio.Task[EndResult]:
@@ -287,7 +361,7 @@ class BrowserSessionManager:
         setup = live.setup
         if live.attached.is_set() and live.runner is not None and live.runner.done():
             setup = None
-        pending = [t for t in (setup, live.greeting, live.watchdog) if t is not None and not t.done()]
+        pending = [t for t in (setup, live.greeting, live.watchdog, live.interview_deadline) if t is not None and not t.done()]
         for task in pending:
             task.cancel()
         if pending:
@@ -316,6 +390,14 @@ class BrowserSessionManager:
         logger.info("Browser runner drained", call_sid=live.call_sid,
                     elapsed_ms=round((time.monotonic() - started) * 1000, 1))
 
+        if live.interview is not None:
+            try:
+                await live.interview.stop(live.error)
+            except Exception:
+                logger.exception("Interview checkpoint failed", call_sid=live.call_sid)
+                live.error = live.error or "Interview checkpoint could not be saved"
+                self._pending_interviews[live.call_sid] = live.interview
+
         try:
             session = get_session(live.call_sid)
             if session is not None:
@@ -340,7 +422,11 @@ class BrowserSessionManager:
         if live.call_sid not in self._pending_logs:
             return EndResult(call_sid=live.call_sid, saved=False,
                              error="Conversation could not be finalized; check server logs")
-        return await self._save_finalized(live.call_sid)
+        result = await self._save_finalized(live.call_sid)
+        if live.call_sid in self._pending_interviews:
+            return result.model_copy(update={"saved": False,
+                "error": "Interview checkpoint could not be saved. Retry saving after fixing local storage."})
+        return result
 
     async def _save_finalized(self, call_sid: str) -> EndResult:
         """Keep a write transaction alive if its HTTP caller is canceled."""
